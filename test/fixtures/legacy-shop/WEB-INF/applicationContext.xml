@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<beans>
+  <bean id="orderAuditService" class="com.acme.order.service.impl.OrderAuditServiceImpl" />
+  <bean id="orderDao" class="com.acme.order.dao.IbatisOrderDao" />
+  <bean id="legacyController" class="com.acme.legacy.LegacyController" />
+  <bean class="org.springframework.web.servlet.handler.SimpleUrlHandlerMapping">
+    <property name="mappings">
+      <props>
+        <prop key="/legacy/save.do">legacyController</prop>
+      </props>
+      <map>
+        <entry key="/legacy/other.do" value-ref="legacyController" />
+      </map>
+    </property>
+  </bean>
+  <bean id="ordinarySettings" class="com.acme.config.OrdinarySettings">
+    <property name="paths">
+      <props><prop key="/not-a-route">legacyController</prop></props>
+    </property>
+  </bean>
+</beans>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE sqlMap PUBLIC "-//ibatis.apache.org//DTD SQL Map 2.0//EN" "http://ibatis.apache.org/dtd/sql-map-2.dtd">
+<sqlMap namespace="order">
+  <sql id="baseColumns">o.ORDER_ID, o.STATUS, o.CUSTOMER_ID</sql>
+
+  <resultMap id="orderResult" class="com.acme.order.domain.Order">
+    <result property="orderId" column="ORDER_ID" />
+  </resultMap>
+
+  <select id="findForAudit" parameterClass="java.lang.Long" resultMap="orderResult">
+    SELECT <include refid="baseColumns" />
+    FROM [dbo].[T_ORDER] o
+    JOIN dbo.T_CUSTOMER c ON c.CUSTOMER_ID = o.CUSTOMER_ID
+    WHERE o.ORDER_ID = #value#
+  </select>
+
+  <update id="updateStatus" parameterClass="java.util.Map">
+    UPDATE [dbo].[T_ORDER]
+       SET STATUS = #status#
+     WHERE ORDER_ID = #orderId#
+  </update>
+
+  <insert id="insertAuditLog" parameterClass="java.util.Map">
+    INSERT INTO dbo.T_ORDER_AUDIT_LOG (ORDER_ID, RESULT)
+    VALUES (#orderId#, #result#)
+  </insert>
+
+  <delete id="deleteDraft" parameterClass="java.lang.Long">
+    DELETE FROM dbo.T_ORDER_DRAFT WHERE ORDER_ID = #value#
+  </delete>
+</sqlMap>

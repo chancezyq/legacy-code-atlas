@@ -1,0 +1,32 @@
+{
+  "baselineVersion": "0.1.0",
+  "createdAt": "2026-07-15",
+  "archive": {
+    "path": "legacy-code-atlas-0.1.0.tar.gz",
+    "sha256": "49bfc6abfb2026c249541b4bb95e6609dcf959737a6098f8af426bbd54bb5e97"
+  },
+  "capturedWith": {
+    "node": "v25.9.0",
+    "platform": "darwin-arm64"
+  },
+  "baselineTests": {
+    "passed": 55,
+    "failed": 0
+  },
+  "files": {
+    "package.json": "475be9e705199474975d3e7a989fd86a9fb1a66cdf721bb402eba3ba0a33810c",
+    "bin/legacy-code-atlas.mjs": "b325f2ac2148ae25657a09fa09f140e9c3ba60e60f10bf24bb15278584ce44ce",
+    "src/analyzer.mjs": "818d5690c2674bd658f3602d21f18096a2f91e57c24037092be9b1d5083c5619",
+    "src/evidence.mjs": "55b01b68b7449e4764b04aa22c0557558c72758179ceb190cd20b06c29f6ebcd",
+    "src/graph.mjs": "d8de6f5433feef61954b4b36366bea335624dedc49b24d804b2dfe6b2fdb16d6",
+    "src/query.mjs": "ffaad1d8eb67cf3f7bb0db6019fab367eb92578822817c838b8ce0f56eb13e94",
+    "src/render.mjs": "74fd9c828707aa3c78ff62bbcd1e616c974d110baebda40508234996a45d1cfb",
+    "src/resolver.mjs": "74e673bc7208a39bea6a5c376ac1f6a9385cbc66386b3344f8daafda6b35be17",
+    "src/scanner.mjs": "ebc512831d3b70c37ac406b1968443f900ea5f9fe1e1c15cc7a43b2ef5a8b424",
+    "src/parsers/ibatis.mjs": "245098be2bba87396bfdca1a0bddf7a6ce8ccd80ca63a50d4ee65092ce53469a",
+    "src/parsers/java.mjs": "3ef4c1d9a0c1fc4a39f017d15107b4ca2bad181ad8eead40509e5e28ce2ff43d",
+    "src/parsers/jsp.mjs": "e17d264d7e84ab5472f493eb6fa1e7e3a7db015400884e7e1ce77b8cb0a405c6",
+    "src/parsers/web-config.mjs": "4fa9ffe2dbda4e676f157ce934ff651b1854066336de1957fd4c1149c1d76129",
+    "src/parsers/xml-utils.mjs": "1bf1522735231b67f23faad0398e8c29707933756fed5b416dce7bc9f9ba5561"
+  }
+}

@@ -1,0 +1,4 @@
+.legacy-code-atlas/
+node_modules/
+*.log
+.DS_Store

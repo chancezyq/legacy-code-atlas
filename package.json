@@ -1,0 +1,20 @@
+{
+  "name": "legacy-code-atlas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Evidence-first analyzer for JSP, legacy Java web apps, and iBATIS 2",
+  "bin": {
+    "legacy-code-atlas": "./bin/legacy-code-atlas.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:installer:windows": "node --test test/installer-windows.test.mjs",
+    "test:scanner": "node --test test/scanner.test.mjs",
+    "benchmark": "node benchmark/benchmark.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

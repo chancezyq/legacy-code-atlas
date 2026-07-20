@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legacy-code-atlas.local/schema/graph-1.0.0.json",
+  "title": "Legacy Code Atlas graph index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "project", "summary", "nodes", "edges", "warnings"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "nodeTypes", "edgeTypes"],
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "nodeTypes": { "$ref": "#/$defs/countMap" },
+        "edgeTypes": { "$ref": "#/$defs/countMap" }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "countMap": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "line", "column", "snippet"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 },
+        "snippet": { "type": "string" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "name", "evidence", "data", "searchText"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": {
+          "enum": ["file", "page", "route", "java_type", "java_method", "spring_bean", "statement", "procedure", "tiles_definition", "table"]
+        },
+        "name": { "type": "string" },
+        "filePath": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "data": { "type": "object" },
+        "searchText": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "target", "type", "confidence", "reason", "evidence", "data"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "type": {
+          "enum": [
+            "contains",
+            "submits_to",
+            "links_to",
+            "requests",
+            "includes",
+            "loads_script",
+            "maps_to",
+            "dispatches_to",
+            "forwards_to",
+            "redirects_to",
+            "uses_tile",
+            "declares",
+            "implements",
+            "implemented_by",
+            "calls",
+            "calls_procedure",
+            "uses_statement",
+            "reads_from",
+            "writes_to",
+            "extends",
+            "extends_tile",
+            "uses_template",
+            "puts"
+          ]
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reason": { "type": "string" },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "data": { "type": "object" }
+      }
+    }
+  }
+}
