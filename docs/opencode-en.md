@@ -17,6 +17,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 The installer does not require administrator privileges, access the network, or run `npm install`. After it finishes, completely close OpenCode, enter the legacy project directory, and restart OpenCode there.
 
+The current OpenCode tool uses Node.js standard modules to start the installed CLI and does not require a global `Bun` object. Node.js 20 or later, already checked by the installer, is sufficient.
+
 The first message must be the command below with no argument or appended question:
 
 ```text

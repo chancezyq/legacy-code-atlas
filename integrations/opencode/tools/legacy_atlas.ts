@@ -1,55 +1,70 @@
+import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import path from "node:path"
+import process from "node:process"
 
-type AtlasContext = { worktree: string; abort: AbortSignal }
-type QueryArgs = { query: string }
-
-function queryArg(description: string) {
+function queryArg(description) {
   return { type: "string", minLength: 1, description }
 }
 
-function resolveCli(): string[] {
-  const node = Bun.which("node")
-  if (!node) throw new Error("找不到 node.exe。请安装 Node.js 20+ 并重新启动 OpenCode。")
-
-  const home = Bun.env.USERPROFILE ?? Bun.env.HOME
+function resolveCli() {
+  const home = process.env.USERPROFILE ?? process.env.HOME
   if (!home) throw new Error("找不到当前用户目录。请重新运行 install.ps1。")
 
   const installed = path.join(home, ".legacy-code-atlas", "bin", "legacy-code-atlas.mjs")
-  if (existsSync(installed)) return [node, installed]
+  if (existsSync(installed)) return ["node", installed]
 
   throw new Error(
     "找不到 Legacy Code Atlas。请重新运行 install.ps1，并完全重启 OpenCode。",
   )
 }
 
-async function runAtlas(
-  command: "analyze" | "overview" | "trace-feature" | "trace-url" | "trace-statement" | "trace-procedure" | "trace-table",
-  query: string | undefined,
-  context: AtlasContext,
-): Promise<string> {
+async function readOutput(stream) {
+  if (!stream) return ""
+
+  const decoder = new TextDecoder()
+  let output = ""
+  for await (const chunk of stream) {
+    output += typeof chunk === "string"
+      ? chunk
+      : decoder.decode(chunk, { stream: true })
+  }
+  return output + decoder.decode()
+}
+
+async function runAtlas(command, query, context) {
   const argv = [...resolveCli(), command, context.worktree]
   if (query) argv.push(query)
-  const process = Bun.spawn(argv, {
+
+  const child = spawn(argv[0], argv.slice(1), {
     cwd: context.worktree,
-    stdout: "pipe",
-    stderr: "pipe",
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   })
 
-  const stop = () => process.kill()
+  const stop = () => child.kill()
   context.abort.addEventListener("abort", stop, { once: true })
 
   try {
+    const exit = new Promise((resolve, reject) => {
+      child.once("error", reject)
+      child.once("close", (code) => resolve(code ?? 1))
+    })
     const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-      process.exited,
+      readOutput(child.stdout),
+      readOutput(child.stderr),
+      exit,
     ])
 
     if (exitCode !== 0 && exitCode !== 3) {
       throw new Error(stderr.trim() || `legacy-code-atlas 退出码：${exitCode}`)
     }
     return stdout.trim() || stderr.trim() || "未找到匹配结果。"
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error("找不到 node.exe。请安装 Node.js 20+ 并重新启动 OpenCode。")
+    }
+    throw error
   } finally {
     context.abort.removeEventListener("abort", stop)
   }
@@ -58,7 +73,7 @@ async function runAtlas(
 export const analyze = {
   description: "建立或刷新当前老项目的 Legacy Code Atlas 索引，并返回项目结构概览",
   args: {},
-  async execute(_args: Record<string, never>, context: AtlasContext) {
+  async execute(_args, context) {
     await runAtlas("analyze", undefined, context)
     return runAtlas("overview", undefined, context)
   },
@@ -69,7 +84,7 @@ export const trace_feature = {
   args: {
     query: queryArg("业务词、页面文字或功能名称"),
   },
-  async execute(args: QueryArgs, context: AtlasContext) {
+  async execute(args, context) {
     return runAtlas("trace-feature", args.query, context)
   },
 }
@@ -79,7 +94,7 @@ export const trace_table = {
   args: {
     query: queryArg("表名，可包含 schema"),
   },
-  async execute(args: QueryArgs, context: AtlasContext) {
+  async execute(args, context) {
     return runAtlas("trace-table", args.query, context)
   },
 }
@@ -89,7 +104,7 @@ export const trace_url = {
   args: {
     query: queryArg("请求 URL，例如 /order/audit.do"),
   },
-  async execute(args: QueryArgs, context: AtlasContext) {
+  async execute(args, context) {
     return runAtlas("trace-url", args.query, context)
   },
 }
@@ -99,7 +114,7 @@ export const trace_statement = {
   args: {
     query: queryArg("iBATIS statement ID，例如 order.updateStatus"),
   },
-  async execute(args: QueryArgs, context: AtlasContext) {
+  async execute(args, context) {
     return runAtlas("trace-statement", args.query, context)
   },
 }
@@ -109,7 +124,7 @@ export const trace_procedure = {
   args: {
     query: queryArg("SQL Server procedure 名称，可包含 schema，例如 dbo.usp_OrderAudit"),
   },
-  async execute(args: QueryArgs, context: AtlasContext) {
+  async execute(args, context) {
     return runAtlas("trace-procedure", args.query, context)
   },
 }

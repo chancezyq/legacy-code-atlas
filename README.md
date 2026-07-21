@@ -201,6 +201,8 @@ npm run benchmark
 
 OpenCode 中没有入口时，先确认安装脚本显示成功，然后完全退出所有 OpenCode 进程再启动。安装脚本必须与 OpenCode 使用同一个 Windows 用户。公司 fork 无法按版本号判断时，请确认它是否支持全局 Agent Skill 和 plain JSON Schema 自定义工具。
 
+如果看到 `Bun is not defined`，说明 OpenCode 仍在加载旧版 `legacy_atlas.ts`。从最新源码目录重新运行 `install.ps1`，确认安装成功后完全退出并重新启动 OpenCode；当前 tool 使用 Node.js 标准模块，不依赖 `Bun` 全局对象。
+
 第一次分析太慢时，先完善 `.legacy-code-atlasignore`，或者从一个业务子模块开始。查询“未找到”时，先重新单独运行一次：
 
 ```text

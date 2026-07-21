@@ -17,6 +17,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 安装器不需要管理员权限、不联网，也不运行 `npm install`。完成后完全关闭 OpenCode，再进入老项目目录重新启动。
 
+当前 OpenCode tool 使用 Node.js 标准模块启动已安装的 CLI，不依赖 `Bun` 全局对象；只要安装器检测到 Node.js 20 或更高版本即可。
+
 第一条消息必须是单独的无参数命令：
 
 ```text

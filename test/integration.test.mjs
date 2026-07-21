@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 function markdownSection(markdown, heading) {
   const lines = markdown.split(/\r?\n/);
@@ -112,19 +115,19 @@ test("OpenCode custom tool passes the query as an argv element without a shell",
 
   const argvBuild = tool.indexOf("const argv = [...resolveCli(), command, context.worktree]");
   const queryPush = tool.indexOf("if (query) argv.push(query)");
-  const spawn = tool.indexOf("Bun.spawn(argv");
+  const spawnCall = tool.indexOf("spawn(argv[0], argv.slice(1)");
 
-  assert.match(tool, /Bun\.spawn\(argv/);
+  assert.match(tool, /spawn\(argv\[0\], argv\.slice\(1\)/);
   assert.doesNotMatch(tool, /shell\s*:/);
   assert.doesNotMatch(tool, /cmd\.exe|powershell/i);
-  assert.match(tool, /function resolveCli\(\): string\[\]/);
-  assert.match(tool, /Bun\.which\("node"\)/);
-  assert.match(tool, /Bun\.env\.USERPROFILE/);
+  assert.match(tool, /function resolveCli\(\)/);
+  assert.match(tool, /return \["node", installed\]/);
+  assert.match(tool, /process\.env\.USERPROFILE/);
   assert.match(tool, /\.legacy-code-atlas/);
   assert.match(tool, /\[\.\.\.resolveCli\(\), command/);
   assert.notEqual(argvBuild, -1, "argv must place worktree after the command");
   assert.notEqual(queryPush, -1, "query must be pushed as one argv element");
-  assert.ok(argvBuild < queryPush && queryPush < spawn, "query must follow worktree and precede spawn");
+  assert.ok(argvBuild < queryPush && queryPush < spawnCall, "query must follow worktree and precede spawn");
 
   for (const [name, command] of [
     ["trace_feature", "trace-feature"],
@@ -144,6 +147,40 @@ test("OpenCode custom tool passes the query as an argv element without a shell",
   assert.match(tool, /runAtlas\("overview"/);
 });
 
+test("OpenCode custom tool runs under Node without a Bun global", async () => {
+  const source = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /\bBun\b/);
+
+  const root = await mkdtemp(path.join(tmpdir(), "legacy-atlas-node-tool-"));
+  const home = path.join(root, "home");
+  const worktree = path.join(root, "project");
+  const cliDir = path.join(home, ".legacy-code-atlas", "bin");
+  const cli = path.join(cliDir, "legacy-code-atlas.mjs");
+  const toolModule = path.join(root, "legacy_atlas.mjs");
+  const originalUserProfile = process.env.USERPROFILE;
+
+  try {
+    await mkdir(cliDir, { recursive: true });
+    await mkdir(worktree, { recursive: true });
+    await writeFile(cli, "console.log(JSON.stringify(process.argv.slice(2)))\n", "utf8");
+    await writeFile(toolModule, source, "utf8");
+    process.env.USERPROFILE = home;
+
+    const tool = await import(`${pathToFileURL(toolModule).href}?test=${Date.now()}`);
+    const result = await tool.analyze.execute({}, {
+      worktree,
+      abort: new AbortController().signal,
+    });
+
+    assert.deepEqual(JSON.parse(result), ["overview", worktree]);
+  } finally {
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("OpenCode custom tool loads without registry or network dependencies", async () => {
   const tool = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
 
@@ -155,10 +192,10 @@ test("OpenCode custom tool loads without registry or network dependencies", asyn
   )].map((match) => match[1]);
   const imports = [...new Set([...staticImports, ...dynamicImports])].sort();
 
-  assert.deepEqual(imports, ["node:fs", "node:path"]);
+  assert.deepEqual(imports, ["node:child_process", "node:fs", "node:path", "node:process"]);
   assert.doesNotMatch(tool, /["']node:(?:http|https|net|tls|dns|dgram)(?:\/[^"']*)?["']/);
   assert.doesNotMatch(tool, /\b(?:fetch|WebSocket|EventSource)\s*\(/);
-  assert.doesNotMatch(tool, /\bBun\.(?:connect|listen|serve|udpSocket|fetch)\s*\(/);
+  assert.doesNotMatch(tool, /\bBun\b/);
   assert.match(tool, /type:\s*["']string["']/);
   assert.match(tool, /minLength:\s*1/);
 });
@@ -167,7 +204,7 @@ test("OpenCode custom tool uses only the installer-owned CLI", async () => {
   const tool = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(tool, /LEGACY_CODE_ATLAS_CLI/);
-  assert.doesNotMatch(tool, /Bun\.which\("legacy-code-atlas"\)/);
+  assert.doesNotMatch(tool, /spawn\(["']legacy-code-atlas["']/);
   assert.match(tool, /USERPROFILE/);
   assert.match(tool, /bin["'],\s*["']legacy-code-atlas\.mjs/);
 });

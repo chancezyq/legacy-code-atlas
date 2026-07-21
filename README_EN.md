@@ -171,6 +171,8 @@ The scanner also ignores Git/IDE metadata, dependency directories, build output,
 
 If `/understand` is unavailable, confirm that installation completed successfully, fully exit all OpenCode processes, and start it again. The installer and OpenCode must run as the same Windows user. For a company fork with an unknown version, verify that it supports user-level Agent Skills and custom tools with plain JSON Schema parameters.
 
+If you see `Bun is not defined`, OpenCode is still loading an older `legacy_atlas.ts`. Run `install.ps1` again from the latest source directory, confirm that installation completes, then fully exit and restart OpenCode. The current tool uses Node.js standard modules and does not require a global `Bun` object.
+
 If the first scan is too slow, improve `.legacy-code-atlasignore` or start with a smaller business module. If a query returns no result, run `/understand` again by itself and then ask a new question using a URL, Java class name, fully qualified statement ID, procedure name, or table name.
 
 For ownership-manifest checks, update conflicts, transaction recovery, and the real-Windows release gate, see [OpenCode installation and recovery](docs/opencode-en.md).
