@@ -261,10 +261,16 @@ function forbiddenPathVariants(files) {
 }
 
 function assertNoAbsolutePathLeaks(result, pathVariants) {
-  if (containsString(result, (value) => pathVariants.some((candidate) => value.includes(candidate)))) {
+  const operationalData = {
+    diagnostics: result.diagnostics,
+    recordDiagnostics: result.record?.diagnostics ?? [],
+    recordWarnings: result.record?.warnings ?? [],
+    error: result.record?.error ?? null,
+  };
+  if (containsString(operationalData, (value) => pathVariants.some((candidate) => value.includes(candidate)))) {
     throw new WorkerFailure();
   }
-  if (containsString(result, looksLikeMachineAbsolutePath)) throw new WorkerFailure();
+  if (containsString(operationalData, looksLikeMachineAbsolutePath)) throw new WorkerFailure();
 }
 
 function safeMetadata(metadata) {

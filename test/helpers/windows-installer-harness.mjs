@@ -32,11 +32,14 @@ const installerFailpointStatements = new Map([
   ],
   ["after-runtime", "Move-RuntimeIntoPlace $Transaction"],
   ["after-skill", "Replace-SkillFile $Transaction"],
-  ["after-tool", "Replace-ToolFile $Transaction"],
+  ["after-legacy-tool", "Backup-LegacyTool $Transaction"],
   ["after-legacy-command", "Backup-LegacyCommand $Transaction"],
   ["after-manifest", "Commit-ManifestFile $Transaction"],
   ["after-recovery", "Recover-InstallTransaction"],
-  ["before-skill-recheck", "$toolDir = Split-Path -Parent $Transaction.ToolTarget"],
+  [
+    "before-skill-recheck",
+    "$skillNamespaceBeforePublish = Get-PathEntryWithoutFollowingTarget $SkillDir",
+  ],
 ]);
 
 function compareOrdinal(left, right) {
@@ -99,6 +102,13 @@ export async function readJson(filePath) {
 export async function sha256(filePath) {
   const content = await readFile(filePath);
   return createHash("sha256").update(content).digest("hex").toUpperCase();
+}
+
+export async function readPublishedSkill(skillPath) {
+  if (typeof skillPath !== "string" || skillPath.length === 0) {
+    throw new TypeError("skillPath must be a non-empty path");
+  }
+  return readFile(skillPath, "utf8");
 }
 
 export async function snapshotTree(root) {
@@ -248,6 +258,51 @@ export async function createV2Install(sandbox, options = {}) {
   };
 }
 
+export async function createV3Install(sandbox, options = {}) {
+  requireSandbox(sandbox);
+  const configDir = options.configDir ?? sandbox.configDir;
+  const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
+  const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillTarget = path.join(skillDir, "SKILL.md");
+  const skillContent = options.skillContent ?? "# Installed Legacy Code Atlas Skill\n";
+  const skillHash = sha256Bytes(Buffer.from(skillContent, "utf8"));
+
+  await mkdir(installDir, { recursive: true });
+  if (!options.omitSkillDir) {
+    await mkdir(skillDir, { recursive: true });
+  }
+  await writeFile(
+    path.join(installDir, "runtime-sentinel.txt"),
+    options.runtimeContent ?? "legacy-code-atlas-v3-runtime\n",
+    "utf8",
+  );
+  if (!options.omitSkill) {
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(skillTarget, skillContent, "utf8");
+  }
+
+  const manifest = {
+    owner: "legacy-code-atlas-install-v3",
+    version: 3,
+    installDir,
+    configDir,
+    ownedFiles: options.ownedFiles ?? [
+      { kind: "agent-skill", path: skillTarget, sha256: skillHash },
+    ],
+  };
+  await writeFile(ownerMarker, `\uFEFF${JSON.stringify(manifest, null, 2)}`, "utf8");
+
+  return {
+    installDir,
+    ownerMarker,
+    skillDir,
+    skillTarget,
+    skillHash,
+    manifest,
+  };
+}
+
 export async function createInstrumentedInstaller({
   sandbox,
   sourceRoot,
@@ -298,27 +353,11 @@ export async function createInstrumentedInstaller({
     "understand",
     "SKILL.md",
   );
-  const copiedTool = path.join(
-    copiedSourceRoot,
-    "integrations",
-    "opencode",
-    "tools",
-    "legacy_atlas.ts",
+  await mkdir(path.dirname(copiedSkill), { recursive: true });
+  await copyFile(
+    path.join(sourceRoot, "integrations", "opencode", "skills", "understand", "SKILL.md"),
+    copiedSkill,
   );
-  await Promise.all([
-    mkdir(path.dirname(copiedSkill), { recursive: true }),
-    mkdir(path.dirname(copiedTool), { recursive: true }),
-  ]);
-  await Promise.all([
-    copyFile(
-      path.join(sourceRoot, "integrations", "opencode", "skills", "understand", "SKILL.md"),
-      copiedSkill,
-    ),
-    copyFile(
-      path.join(sourceRoot, "integrations", "opencode", "tools", "legacy_atlas.ts"),
-      copiedTool,
-    ),
-  ]);
 
   const installerPath = path.join(copiedSourceRoot, "install.ps1");
   const installer = await readFile(path.join(sourceRoot, "install.ps1"), "utf8");
@@ -346,7 +385,9 @@ export async function createInstrumentedInstaller({
   }
   const replacement = phase === "after-recovery"
     ? `${newline}${statement}${newline}${marker}${newline}${effect}${newline}`
-    : [statement, marker, effect].join(newline);
+    : phase === "before-skill-recheck"
+      ? [marker, effect, statement].join(newline)
+      : [statement, marker, effect].join(newline);
   const instrumented = installer.replace(anchor, replacement);
   await writeFile(installerPath, instrumented, "utf8");
 

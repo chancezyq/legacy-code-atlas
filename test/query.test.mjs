@@ -54,6 +54,232 @@ test("search ranks exact identifiers above fuzzy supporting text", async () => {
   assert.equal(results[0].score > results.at(-1).score, true);
 });
 
+test("search normalizes and tokenizes a query only once", () => {
+  let conversions = 0;
+  const query = {
+    toString() {
+      conversions += 1;
+      return "OrderAudit";
+    },
+  };
+  const graph = {
+    nodes: Array.from({ length: 100 }, (_, index) => ({
+      id: `java_type:OrderAudit${index}`,
+      type: "java_type",
+      name: `OrderAudit${index}`,
+      filePath: `src/OrderAudit${index}.java`,
+      searchText: [],
+    })),
+    edges: [],
+  };
+
+  assert.equal(searchGraph(graph, query).length, 25);
+  assert.equal(conversions, 1);
+});
+
+test("dense call graphs stop at a bounded traversal state limit", () => {
+  const size = 9;
+  const nodes = Array.from({ length: size }, (_, index) => ({
+    id: `java_method:Dense#method${index}/0`,
+    type: "java_method",
+    name: index === 0 ? "Dense.entry" : `Dense.method${index}`,
+    filePath: `src/Dense${index}.java`,
+    evidence: [],
+    searchText: [],
+  }));
+  const edges = [];
+  for (const source of nodes) {
+    for (const target of nodes) {
+      if (source.id === target.id) continue;
+      edges.push({
+        id: `calls:${source.id}->${target.id}`,
+        type: "calls",
+        source: source.id,
+        target: target.id,
+        evidence: [],
+        confidence: 1,
+      });
+    }
+  }
+
+  const result = traceFeature({ nodes, edges, warnings: [] }, "Dense.entry");
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.paths.length, 100);
+  assert.equal(result.stateLimitReached, true);
+  assert.equal(result.pathLimitReached, true);
+  assert.match(result.warnings.join("\n"), /(?:状态|state)[^\n]*(?:上限|limit)/i);
+  assert.match(result.warnings.join("\n"), /(?:路径|path)[^\n]*(?:上限|limit)/i);
+});
+
+test("duplicate state-limit frontier entries do not falsely report the path limit", () => {
+  const root = {
+    id: "java_method:DuplicateFrontier#entry/0",
+    type: "java_method",
+    name: "DuplicateFrontier.entry",
+    filePath: "src/DuplicateFrontier.java",
+    evidence: [],
+    searchText: [],
+  };
+  const tables = Array.from({ length: 100 }, (_, index) => ({
+    id: `table:dbo.duplicate_frontier_${index}`,
+    type: "table",
+    name: `dbo.duplicate_frontier_${index}`,
+    filePath: "db/schema.sql",
+    evidence: [],
+    searchText: [],
+  }));
+  const uniqueEdges = tables.map((table) => ({
+    id: `reads_from:${root.id}->${table.id}`,
+    type: "reads_from",
+    source: root.id,
+    target: table.id,
+    confidence: 1,
+    reason: "duplicate frontier fixture",
+    evidence: [],
+  }));
+  const edges = uniqueEdges.flatMap((edge) => Array.from({ length: 50 }, () => edge));
+
+  const result = traceFeature({ nodes: [root, ...tables], edges, warnings: [] }, root.name);
+
+  assert.equal(result.stateLimitReached, true);
+  assert.equal(result.paths.length, 100);
+  assert.equal(result.pathLimitReached, false);
+  assert.doesNotMatch(result.warnings.join("\n"), /100[^\n]*(?:路径|path)|(?:路径|path)[^\n]*100/i);
+});
+
+test("truncated dense branches remain visible beside completed short paths", () => {
+  const methods = Array.from({ length: 9 }, (_, index) => ({
+    id: `java_method:Mixed#method${index}/0`,
+    type: "java_method",
+    name: index === 0 ? "Mixed.entry" : `Mixed.method${index}`,
+    filePath: `src/Mixed${index}.java`,
+    evidence: [],
+    searchText: [],
+  }));
+  const table = {
+    id: "table:dbo.short_result",
+    type: "table",
+    name: "dbo.short_result",
+    filePath: "db/schema.sql",
+    evidence: [],
+    searchText: [],
+  };
+  const edges = [{
+    id: `writes_to:${methods[0].id}->${table.id}`,
+    type: "writes_to",
+    source: methods[0].id,
+    target: table.id,
+    evidence: [],
+    confidence: 1,
+  }];
+  for (const source of methods) {
+    for (const target of methods) {
+      if (source.id === target.id) continue;
+      edges.push({
+        id: `calls:${source.id}->${target.id}`,
+        type: "calls",
+        source: source.id,
+        target: target.id,
+        evidence: [],
+        confidence: 1,
+      });
+    }
+  }
+
+  const result = traceFeature({ nodes: [...methods, table], edges, warnings: [] }, "Mixed.entry");
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.paths.some((path) => path.nodes.at(-1) === table.id), true);
+  assert.equal(
+    result.paths.some((path) => path.truncated === true && path.nodes.includes(methods[8].id)),
+    true,
+  );
+});
+
+test("split traces report the per-direction state limit", () => {
+  const statement = {
+    id: "statement:dense.lookup",
+    type: "statement",
+    name: "dense.lookup",
+    filePath: "sqlmap/dense.xml",
+    evidence: [],
+    searchText: [],
+  };
+  const methods = Array.from({ length: 9 }, (_, index) => ({
+    id: `java_method:DenseCaller#method${index}/0`,
+    type: "java_method",
+    name: `DenseCaller.method${index}`,
+    filePath: `src/DenseCaller${index}.java`,
+    evidence: [],
+    searchText: [],
+  }));
+  const edges = [];
+  for (const source of methods) {
+    edges.push({
+      id: `uses_statement:${source.id}->${statement.id}`,
+      type: "uses_statement",
+      source: source.id,
+      target: statement.id,
+      evidence: [],
+      confidence: 1,
+    });
+    for (const target of methods) {
+      if (source.id === target.id) continue;
+      edges.push({
+        id: `calls:${source.id}->${target.id}`,
+        type: "calls",
+        source: source.id,
+        target: target.id,
+        evidence: [],
+        confidence: 1,
+      });
+    }
+  }
+
+  const result = traceStatement({ nodes: [statement, ...methods], edges, warnings: [] }, "dense.lookup");
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.stateLimit, 5_000);
+  assert.match(result.warnings.join("\n"), /每个方向[^\n]*5000|5000[^\n]*每个方向/);
+});
+
+test("path-count truncation is not reported as the traversal state limit", () => {
+  const root = {
+    id: "java_method:Wide#entry/0",
+    type: "java_method",
+    name: "Wide.entry",
+    filePath: "src/Wide.java",
+    evidence: [],
+    searchText: [],
+  };
+  const tables = Array.from({ length: 101 }, (_, index) => ({
+    id: `table:dbo.result_${index}`,
+    type: "table",
+    name: `dbo.result_${index}`,
+    filePath: "db/schema.sql",
+    evidence: [],
+    searchText: [],
+  }));
+  const edges = tables.map((table, index) => ({
+    id: `reads_from:${root.id}->${table.id}`,
+    type: "reads_from",
+    source: root.id,
+    target: table.id,
+    confidence: 1,
+    reason: "wide result",
+    evidence: [{ file: "src/Wide.java", line: index + 1, column: 1, snippet: "query" }],
+  }));
+
+  const result = traceFeature({ nodes: [root, ...tables], edges, warnings: [] }, "Wide.entry");
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.paths.length, 100);
+  assert.equal(result.statesExpanded < result.stateLimit, true);
+  assert.match(result.warnings.join("\n"), /100[^\n]*(?:路径|path)|(?:路径|path)[^\n]*100/i);
+  assert.doesNotMatch(result.warnings.join("\n"), /5000[^\n]*(?:状态|state)|(?:状态|state)[^\n]*5000/i);
+});
+
 test("Markdown renderer distinguishes proven and heuristic edges and cites source lines", async () => {
   const graph = await analyzeProject(projectRoot);
   const trace = traceFeature(graph, "订单审核");
@@ -64,6 +290,177 @@ test("Markdown renderer distinguishes proven and heuristic edges and cites sourc
   assert.match(markdown, /确定关系/);
   assert.match(markdown, /启发式关系/);
   assert.match(markdown, /order\.updateStatus/);
+});
+
+test("Markdown renderer keeps control characters from forging output structure", () => {
+  const trace = {
+    mode: "feature",
+    query: "OrderAudit\r\n# forged query heading\u2028# forged Unicode heading",
+    matches: [{ id: "java_method:entry", type: "java_method", name: "Entry\u001b[31m", score: 1000 }],
+    nodes: [
+      { id: "java_method:entry", type: "java_method", name: "Entry\u001b[31m" },
+      { id: "table:orders", type: "table", name: "Orders" },
+    ],
+    edges: [{
+      id: "edge:1",
+      source: "java_method:entry",
+      target: "table:orders",
+      type: "reads_from",
+      confidence: 1,
+      reason: "verified\r\n# forged reason heading\u202eTXT",
+      evidence: [{ file: "src/Order.java", line: 10 }],
+    }],
+    paths: [{ nodes: ["java_method:entry", "table:orders"], edges: ["reads_from"], edgeIds: ["edge:1"] }],
+    warnings: ["partial\r\n# forged warning heading\u2066TXT"],
+  };
+
+  const markdown = renderTraceMarkdown(trace);
+
+  assert.doesNotMatch(markdown, /\u001b/);
+  assert.doesNotMatch(markdown, /[\u2028\u2029\u202a-\u202e\u2066-\u2069]/u);
+  assert.doesNotMatch(markdown, /^# forged/m);
+  assert.match(markdown, /forged query heading/);
+  assert.match(markdown, /forged reason heading/);
+  assert.match(markdown, /forged warning heading/);
+});
+
+test("Markdown renderer enforces a total output budget", () => {
+  const root = {
+    id: "java_method:Wide#entry/0",
+    type: "java_method",
+    name: "中".repeat(32 * 1024),
+    score: 1000,
+  };
+  const tables = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `table:dbo.result_${index}`,
+    type: "table",
+    name: `dbo.result_${index}`,
+  }));
+  const trace = {
+    mode: "feature",
+    query: "Wide.entry",
+    matches: [root],
+    nodes: [root, ...tables],
+    edges: tables.map((table, index) => ({
+      id: `reads_from:${index}`,
+      source: root.id,
+      target: table.id,
+      type: "reads_from",
+      confidence: 1,
+      reason: "verified",
+      evidence: [],
+    })),
+    paths: tables.map((table, index) => ({
+      nodes: [root.id, table.id],
+      edges: ["reads_from"],
+      edgeIds: [`reads_from:${index}`],
+    })),
+    warnings: [],
+  };
+
+  const markdown = renderTraceMarkdown(trace);
+
+  assert.equal(Buffer.byteLength(markdown) <= 256 * 1024, true);
+  assert.match(markdown, /(?:输出|output)[^\n]*(?:截断|truncat)/i);
+});
+
+test("Markdown renderer reports when the primary path display reaches its item cap", () => {
+  const root = {
+    id: "java_method:Paths#entry/0",
+    type: "java_method",
+    name: "Paths.entry",
+    score: 1000,
+  };
+  const tables = Array.from({ length: 13 }, (_, index) => ({
+    id: `table:dbo.path_${index}`,
+    type: "table",
+    name: `dbo.path_${index}`,
+  }));
+  const trace = {
+    mode: "feature",
+    query: "Paths.entry",
+    matches: [root],
+    nodes: [root, ...tables],
+    edges: [],
+    paths: tables.map((table, index) => ({
+      nodes: [root.id, table.id],
+      edges: ["reads_from"],
+      edgeIds: [`reads_from:${index}`],
+    })),
+    warnings: [],
+  };
+
+  const markdown = renderTraceMarkdown(trace);
+  const primaryPaths = markdown.slice(
+    markdown.indexOf("## 主要链路"),
+    markdown.indexOf("## 确定关系"),
+  );
+
+  assert.equal(primaryPaths.match(/^- /gm)?.length, 12);
+  assert.equal(primaryPaths.includes("table:dbo.path_12"), false);
+  assert.match(markdown, /(?:输出|output)[^\n]*(?:截断|truncat)/i);
+});
+
+test("Markdown renderer bounds no-match warnings and does not read omitted items", () => {
+  const warnings = Array.from({ length: 201 }, (_, index) => `warning ${index}`);
+  Object.defineProperty(warnings, "200", {
+    enumerable: true,
+    get() {
+      throw new Error("renderer read an omitted warning");
+    },
+  });
+  const trace = {
+    mode: "feature",
+    query: "missing",
+    matches: [],
+    nodes: [],
+    edges: [],
+    paths: [],
+    warnings,
+  };
+
+  const markdown = renderTraceMarkdown(trace);
+
+  assert.equal(Buffer.byteLength(markdown) <= 256 * 1024, true);
+  assert.match(markdown, /(?:输出|output)[^\n]*(?:截断|truncat)/i);
+});
+
+test("Markdown renderer caps relation work before reading omitted edge details", () => {
+  const root = { id: "java_method:Bounded#entry/0", type: "java_method", name: "Bounded.entry", score: 1000 };
+  const tables = Array.from({ length: 501 }, (_, index) => ({
+    id: `table:dbo.bounded_${index}`,
+    type: "table",
+    name: `dbo.bounded_${index}`,
+  }));
+  const edges = tables.map((table, index) => ({
+    id: `reads_from:${index}`,
+    source: root.id,
+    target: table.id,
+    type: "reads_from",
+    confidence: 1,
+    reason: "verified",
+    evidence: [],
+  }));
+  Object.defineProperty(edges[500], "reason", {
+    enumerable: true,
+    get() {
+      throw new Error("renderer read an omitted relation");
+    },
+  });
+  const trace = {
+    mode: "feature",
+    query: "Bounded.entry",
+    matches: [root],
+    nodes: [root, ...tables],
+    edges,
+    paths: [],
+    warnings: [],
+  };
+
+  const markdown = renderTraceMarkdown(trace);
+
+  assert.equal(Buffer.byteLength(markdown) <= 256 * 1024, true);
+  assert.match(markdown, /(?:输出|output)[^\n]*(?:截断|truncat)/i);
 });
 
 function record(relativePath, language, content, category = "code") {

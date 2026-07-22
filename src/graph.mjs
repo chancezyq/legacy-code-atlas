@@ -1,5 +1,8 @@
 import { normalizePath } from "./evidence.mjs";
+import { MAX_EVIDENCE_SNIPPET_CHARACTERS, MAX_SEARCH_TEXT_CHARACTERS } from "./index-validation.mjs";
+import { replaceUnsafeTextControls } from "./text-safety.mjs";
 
+const SEARCH_TEXT_CHUNK_OVERLAP_CHARACTERS = 2 * 1024;
 const nodeStates = new WeakMap();
 const observableByTarget = new WeakMap();
 const observableByProxy = new WeakMap();
@@ -12,8 +15,46 @@ function normalizeKey(key) {
 function normalizeEvidence(evidence = []) {
   return evidence.map((entry) => {
     const snapshot = cloneValue(entry);
-    return { ...snapshot, file: normalizePath(snapshot.file) };
+    const normalized = {
+      ...snapshot,
+      file: normalizePath(snapshot.file),
+    };
+    if (snapshot.snippet !== undefined) {
+      normalized.snippet = replaceUnsafeTextControls(snapshot.snippet)
+        .slice(0, MAX_EVIDENCE_SNIPPET_CHARACTERS);
+    }
+    return normalized;
   });
+}
+
+function normalizeSearchText(searchText = []) {
+  const unique = new Set();
+  const chunkStep = MAX_SEARCH_TEXT_CHARACTERS - SEARCH_TEXT_CHUNK_OVERLAP_CHARACTERS;
+  for (const value of searchText) {
+    const text = replaceUnsafeTextControls(value);
+    if (text.length <= MAX_SEARCH_TEXT_CHARACTERS) {
+      unique.add(text);
+      continue;
+    }
+
+    // The overlap preserves a maximum-length CLI query that crosses a chunk boundary.
+    for (let chunkStart = 0; chunkStart < text.length; chunkStart += chunkStep) {
+      const start = chunkStart > 0
+        && /[\uD800-\uDBFF]/u.test(text[chunkStart - 1])
+        && /[\uDC00-\uDFFF]/u.test(text[chunkStart])
+        ? chunkStart - 1
+        : chunkStart;
+      let end = Math.min(start + MAX_SEARCH_TEXT_CHARACTERS, text.length);
+      if (end < text.length
+        && /[\uD800-\uDBFF]/u.test(text[end - 1])
+        && /[\uDC00-\uDFFF]/u.test(text[end])) {
+        end -= 1;
+      }
+      unique.add(text.slice(start, end));
+      if (end === text.length) break;
+    }
+  }
+  return [...unique];
 }
 
 function isWeakMapKey(value) {
@@ -179,7 +220,6 @@ export class GraphBuilder {
     const normalizedKey = normalizeKey(key);
     const id = `${type}:${normalizedKey}`;
     const normalizedEvidence = normalizeEvidence(evidence);
-    const searchTextKeys = new Set(searchText.map(String));
     const incoming = {
       id,
       type,
@@ -187,7 +227,7 @@ export class GraphBuilder {
       ...(filePath ? { filePath: normalizePath(filePath) } : {}),
       evidence: normalizedEvidence,
       data,
-      searchText: [...searchTextKeys],
+      searchText: normalizeSearchText(searchText),
     };
     const existing = this.nodes.get(id);
     if (!existing) {

@@ -2,12 +2,17 @@ function normalize(value) {
   return String(value ?? "").normalize("NFKC").toLowerCase().trim();
 }
 
-function searchableValues(node) {
-  return [node.name, node.id, node.filePath, ...(node.searchText ?? [])].filter(Boolean).map(normalize);
+const DEFAULT_MAX_TRAVERSAL_STATES = 5_000;
+
+function normalizedSearchText(node) {
+  return (node.searchText ?? []).filter(Boolean).map(normalize);
 }
 
-function scoreNode(node, query) {
-  const term = normalize(query);
+function searchableValues(node, searchText) {
+  return [node.name, node.id, node.filePath].filter(Boolean).map(normalize).concat(searchText);
+}
+
+function scoreNode(node, term, tokens) {
   if (!term) return 0;
   const name = normalize(node.name);
   const id = normalize(node.id);
@@ -15,23 +20,26 @@ function scoreNode(node, query) {
   if (id === term || id.endsWith(`:${term}`)) return 950;
   if (name.includes(term)) return 850;
   if (id.includes(term)) return 800;
+  const searchText = normalizedSearchText(node);
   let score = 0;
-  for (const value of searchableValues(node)) {
+  for (const value of searchableValues(node, searchText)) {
     if (value === term) score = Math.max(score, 750);
     else if (value.includes(term)) score = Math.max(score, 650);
-    else {
-      const tokens = term.split(/\s+/).filter(Boolean);
-      if (tokens.length && tokens.every((token) => value.includes(token))) score = Math.max(score, 500);
-    }
+    else if (tokens.length && tokens.every((token) => value.includes(token))) score = Math.max(score, 500);
+  }
+  if (tokens.length && tokens.every((token) => searchText.some((value) => value.includes(token)))) {
+    score = Math.max(score, 500);
   }
   return score;
 }
 
 export function searchGraph(graph, query, options = {}) {
   const allowedTypes = options.types ? new Set(options.types) : null;
+  const term = normalize(query);
+  const tokens = term.split(/\s+/).filter(Boolean);
   return graph.nodes
     .filter((node) => !allowedTypes || allowedTypes.has(node.type))
-    .map((node) => ({ ...node, score: scoreNode(node, query) }))
+    .map((node) => ({ ...node, score: scoreNode(node, term, tokens) }))
     .filter((node) => node.score > 0)
     .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id, "en"))
     .slice(0, options.limit ?? 25);
@@ -57,6 +65,7 @@ function traverse(graph, startIds, options = {}) {
   const direction = options.direction ?? "outgoing";
   const maxDepth = options.maxDepth ?? 14;
   const maxPaths = options.maxPaths ?? 100;
+  const maxStates = options.maxStates ?? DEFAULT_MAX_TRAVERSAL_STATES;
   const allowedEdgeTypes = options.allowedEdgeTypes ? new Set(options.allowedEdgeTypes) : null;
   const adjacent = adjacency(graph, direction, allowedEdgeTypes);
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -64,9 +73,24 @@ function traverse(graph, startIds, options = {}) {
   const visitedEdges = new Set();
   const paths = [];
   const queue = startIds.map((id) => ({ current: id, nodes: [id], edges: [], edgeIds: [] }));
+  let queueIndex = 0;
+  let statesExpanded = 0;
+  let statesEnqueued = queue.length;
+  let truncated = false;
+  let stateLimitReached = false;
+  let pathLimitReached = false;
+  let haltedPath = null;
 
-  while (queue.length && paths.length < maxPaths) {
-    const path = queue.shift();
+  traversal: while (queueIndex < queue.length && paths.length < maxPaths) {
+    if (statesExpanded >= maxStates) {
+      truncated = true;
+      stateLimitReached = true;
+      break;
+    }
+    const path = queue[queueIndex];
+    queue[queueIndex] = null;
+    queueIndex += 1;
+    statesExpanded += 1;
     const next = (adjacent.get(path.current) ?? []).filter((entry) => !path.nodes.includes(entry.to));
     const isTerminal = next.length === 0
       || path.edges.length >= maxDepth
@@ -76,6 +100,12 @@ function traverse(graph, startIds, options = {}) {
       continue;
     }
     for (const entry of next) {
+      if (statesEnqueued >= maxStates) {
+        truncated = true;
+        stateLimitReached = true;
+        haltedPath = path;
+        break traversal;
+      }
       visitedNodes.add(entry.to);
       visitedEdges.add(entry.edge.id);
       queue.push({
@@ -84,6 +114,30 @@ function traverse(graph, startIds, options = {}) {
         edges: [...path.edges, entry.edge.type],
         edgeIds: [...path.edgeIds, entry.edge.id],
       });
+      statesEnqueued += 1;
+    }
+  }
+
+  if (paths.length >= maxPaths && queueIndex < queue.length) {
+    truncated = true;
+    pathLimitReached = true;
+  }
+  if (stateLimitReached && paths.length < maxPaths) {
+    const frontier = [haltedPath, ...queue.slice(queueIndex)]
+      .filter((path) => path?.nodes.length > 1)
+      .sort((left, right) => right.nodes.length - left.nodes.length
+        || left.nodes.join().localeCompare(right.nodes.join(), "en"));
+    const seen = new Set(paths.map((path) => `${path.nodes.join("|")}|${path.edgeIds.join("|")}`));
+    for (const path of frontier) {
+      const key = `${path.nodes.join("|")}|${path.edgeIds.join("|")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (paths.length < maxPaths) {
+        paths.push({ nodes: path.nodes, edges: path.edges, edgeIds: path.edgeIds, truncated: true });
+        continue;
+      }
+      pathLimitReached = true;
+      break;
     }
   }
 
@@ -91,6 +145,13 @@ function traverse(graph, startIds, options = {}) {
     nodes: graph.nodes.filter((node) => visitedNodes.has(node.id)),
     edges: graph.edges.filter((edge) => visitedEdges.has(edge.id)),
     paths: paths.sort((left, right) => right.nodes.length - left.nodes.length || left.nodes.join().localeCompare(right.nodes.join(), "en")),
+    truncated,
+    stateLimit: maxStates,
+    pathLimit: maxPaths,
+    stateLimitReached,
+    pathLimitReached,
+    statesExpanded,
+    statesEnqueued,
   };
 }
 
@@ -98,15 +159,36 @@ function mergeTraversals(...traversals) {
   const nodes = new Map();
   const edges = new Map();
   const paths = new Map();
+  let truncated = false;
+  let stateLimit = 0;
+  let pathLimit = 0;
+  let stateLimitReached = false;
+  let pathLimitReached = false;
+  let statesExpanded = 0;
+  let statesEnqueued = 0;
   for (const traversal of traversals) {
     for (const node of traversal.nodes) nodes.set(node.id, node);
     for (const edge of traversal.edges) edges.set(edge.id, edge);
     for (const path of traversal.paths) paths.set(`${path.nodes.join("|")}|${path.edgeIds.join("|")}`, path);
+    truncated ||= traversal.truncated;
+    stateLimit = Math.max(stateLimit, traversal.stateLimit);
+    pathLimit = Math.max(pathLimit, traversal.pathLimit);
+    stateLimitReached ||= traversal.stateLimitReached;
+    pathLimitReached ||= traversal.pathLimitReached;
+    statesExpanded += traversal.statesExpanded;
+    statesEnqueued += traversal.statesEnqueued;
   }
   return {
     nodes: [...nodes.values()].sort((left, right) => left.id.localeCompare(right.id, "en")),
     edges: [...edges.values()].sort((left, right) => left.id.localeCompare(right.id, "en")),
     paths: [...paths.values()].sort((left, right) => right.nodes.length - left.nodes.length || left.nodes.join().localeCompare(right.nodes.join(), "en")),
+    truncated,
+    stateLimit,
+    pathLimit,
+    stateLimitReached,
+    pathLimitReached,
+    statesExpanded,
+    statesEnqueued,
   };
 }
 
@@ -119,6 +201,13 @@ function trace(graph, query, { mode, types, direction, allowedEdgeTypes }) {
     nodes: [],
     edges: [],
     paths: [],
+    truncated: false,
+    stateLimit: 0,
+    pathLimit: 0,
+    stateLimitReached: false,
+    pathLimitReached: false,
+    statesExpanded: 0,
+    statesEnqueued: 0,
     warnings: [`未找到：${query}`, ...(graph.warnings ?? [])],
   };
   const topScore = matches[0].score;
@@ -135,7 +224,19 @@ function trace(graph, query, { mode, types, direction, allowedEdgeTypes }) {
     query,
     matches: starts,
     ...traversal,
-    warnings: [...(graph.warnings ?? [])],
+    warnings: [
+      ...(traversal.stateLimitReached
+        ? [direction === "split"
+            ? `追踪在至少一个方向达到每个方向 ${traversal.stateLimit} 个状态的安全上限，结果已截断。`
+            : `追踪达到 ${traversal.stateLimit} 个状态的安全上限，结果已截断。`]
+        : []),
+      ...(traversal.pathLimitReached
+        ? [direction === "split"
+            ? `追踪在至少一个方向达到每个方向 ${traversal.pathLimit} 条路径的结果上限，结果已截断。`
+            : `追踪达到 ${traversal.pathLimit} 条路径的结果上限，结果已截断。`]
+        : []),
+      ...(graph.warnings ?? []),
+    ],
   };
 }
 

@@ -4,6 +4,10 @@ import test from "node:test";
 
 import { createEvidence } from "../src/evidence.mjs";
 import { GraphBuilder, serializeGraph } from "../src/graph.mjs";
+import { validateGraphIndex } from "../src/index-validation.mjs";
+import { searchGraph } from "../src/query.mjs";
+
+const MAX_SEARCH_TEXT_CHARACTERS = 256 * 1024;
 
 test("graph creates stable nodes and deduplicates evidence-backed edges", () => {
   const graph = new GraphBuilder({ projectRoot: "/repo" });
@@ -48,6 +52,92 @@ test("graph creates stable nodes and deduplicates evidence-backed edges", () => 
   assert.equal(result.nodes.length, 2);
   assert.equal(result.edges.length, 1);
   assert.equal(result.edges[0].confidence, 1);
+});
+
+test("graph chunks oversized generated search text without losing boundary queries", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const boundaryQuery = "CROSS_BOUNDARY_QUERY";
+  const tailQuery = "SEARCH_TEXT_TAIL";
+  const oversized = `${"A".repeat(MAX_SEARCH_TEXT_CHARACTERS - 8)}${boundaryQuery}`
+    + `${"B".repeat(MAX_SEARCH_TEXT_CHARACTERS)}${tailQuery}`;
+  const node = graph.addNode({
+    type: "page",
+    key: "large.jsp",
+    name: "large.jsp",
+    filePath: "large.jsp",
+    searchText: [oversized],
+    data: { visibleText: oversized },
+  });
+
+  const result = graph.toJSON();
+
+  assert.equal(node.searchText.length > 1, true);
+  assert.equal(node.searchText.every((value) => value.length <= MAX_SEARCH_TEXT_CHARACTERS), true);
+  assert.equal(searchGraph(result, boundaryQuery)[0]?.id, node.id);
+  assert.equal(searchGraph(result, tailQuery)[0]?.id, node.id);
+  assert.doesNotThrow(() => validateGraphIndex(result));
+});
+
+test("graph preserves multi-token search across chunks from one generated value", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const oversized = `alpha ${"X".repeat(MAX_SEARCH_TEXT_CHARACTERS + 1)} omega`;
+  const node = graph.addNode({
+    type: "page",
+    key: "multi-token.jsp",
+    name: "multi-token.jsp",
+    filePath: "multi-token.jsp",
+    searchText: [oversized],
+    data: { visibleText: oversized },
+  });
+
+  const result = graph.toJSON();
+
+  assert.equal(searchGraph(result, "alpha omega")[0]?.id, node.id);
+});
+
+test("multi-token search never combines text from different graph nodes", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  graph.addNode({ type: "page", key: "alpha.jsp", searchText: ["alpha"] });
+  graph.addNode({ type: "page", key: "omega.jsp", searchText: ["omega"] });
+
+  assert.deepEqual(searchGraph(graph.toJSON(), "alpha omega"), []);
+});
+
+test("graph chunks generated search text only at Unicode scalar boundaries", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const chunkStep = MAX_SEARCH_TEXT_CHARACTERS - (2 * 1024);
+  const oversized = `${"A".repeat(chunkStep - 1)}😀${"B".repeat(3 * 1024)}`;
+  const node = graph.addNode({
+    type: "page",
+    key: "unicode.jsp",
+    name: "unicode.jsp",
+    filePath: "unicode.jsp",
+    searchText: [oversized],
+  });
+
+  const hasUnpairedSurrogate = (value) => [...value].some((character) => {
+    if (character.length !== 1) return false;
+    const codeUnit = character.charCodeAt(0);
+    return codeUnit >= 0xD800 && codeUnit <= 0xDFFF;
+  });
+
+  assert.equal(node.searchText.some(hasUnpairedSurrogate), false);
+});
+
+test("graph sanitizes source controls before validating generated search text", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const node = graph.addNode({
+    type: "page",
+    key: "controls.jsp",
+    name: "controls.jsp",
+    filePath: "controls.jsp",
+    searchText: ["Order\u200BReview\tPanel"],
+  });
+
+  const result = graph.toJSON();
+
+  assert.deepEqual(node.searchText, ["Order Review Panel"]);
+  assert.doesNotThrow(() => validateGraphIndex(result));
 });
 
 test("graph output is sorted and rejects invalid or dangling edges", () => {

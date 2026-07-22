@@ -150,6 +150,38 @@ test("one parser failure remains an isolated file result inside a successful bat
   assertPortableResults(results, [root]);
 });
 
+test("source-derived absolute-looking paths do not trigger worker failure", async (t) => {
+  const { root, files } = await projectFiles(t, [
+    [
+      "WEB-INF/web.xml",
+      "<web-app><servlet><servlet-name>home</servlet-name><servlet-class>com.acme.HomeServlet</servlet-class></servlet><servlet-mapping><servlet-name>home</servlet-name><url-pattern>/home/*</url-pattern></servlet-mapping></web-app>",
+    ],
+    [
+      "src/com/acme/LegacyPaths.java",
+      'package com.acme; class LegacyPaths { String root = "C:\\\\company\\\\app"; }',
+    ],
+  ]);
+  let fallbacks = 0;
+
+  const results = await processFileBatches(plan(files), {
+    workers: 1,
+    workerUrl: delayedWorkerUrl,
+    async mainThreadProcessor(file, options) {
+      fallbacks += 1;
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.equal(results.length, files.length);
+  assert.equal(fallbacks, 0);
+  assert.deepEqual(results.map((result) => result.status), ["parsed", "parsed"]);
+  const webResult = results.find((result) => result.relativePath === "WEB-INF/web.xml");
+  const javaResult = results.find((result) => result.relativePath === "src/com/acme/LegacyPaths.java");
+  assert.equal(webResult.record.facts.web.routes[0].url, "/home/*");
+  assert.equal(javaResult.record.facts.stringConstants[0].value, "C:\\\\company\\\\app");
+  assertPortableResults(results, [root]);
+});
+
 test("a crashed batch is retried once on a fresh real worker", async (t) => {
   const control = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2));
   const { files } = await projectFiles(t, [
@@ -421,7 +453,47 @@ test("Windows absolute paths from worker diagnostics trigger isolated fallback",
   assert.equal(JSON.stringify(results).includes("C:\\\\company"), false);
 });
 
-test("strict result and record protocol rejects malformed, scheduler, graph, and machine-path data", async (t) => {
+test("valid worker diagnostics containing machine paths trigger isolated fallback", async (t) => {
+  const { root, files } = await projectFiles(t, [
+    ["src/Safe.java", "class Safe {}"],
+  ]);
+  let fallbacks = 0;
+  const results = await processFileBatches(plan(files), {
+    workers: 1,
+    workerUrl: crashWorkerUrl,
+    workerData: { protocolMode: "absolute-valid-diagnostic" },
+    async mainThreadProcessor(file, options) {
+      fallbacks += 1;
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.equal(fallbacks, 1);
+  assert.equal(results[0].status, "parsed");
+  assertPortableResults(results, [root, "/private/company/legacy-project"]);
+});
+
+test("valid serialized worker errors containing machine paths trigger isolated fallback", async (t) => {
+  const { root, files } = await projectFiles(t, [
+    ["src/Safe.java", "class Safe {}"],
+  ]);
+  let fallbacks = 0;
+  const results = await processFileBatches(plan(files), {
+    workers: 1,
+    workerUrl: crashWorkerUrl,
+    workerData: { protocolMode: "absolute-valid-error" },
+    async mainThreadProcessor(file, options) {
+      fallbacks += 1;
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.equal(fallbacks, 1);
+  assert.equal(results[0].status, "parsed");
+  assertPortableResults(results, [root, "/private/company/legacy-project"]);
+});
+
+test("strict result and record protocol rejects malformed scheduler and graph data", async (t) => {
   const invalidModes = [
     "missing-result-field",
     "extra-result-graph",
@@ -436,9 +508,7 @@ test("strict result and record protocol rejects malformed, scheduler, graph, and
     "invalid-record-facts-array",
     "mismatched-diagnostics",
     "invalid-error-object",
-    "unknown-posix-fact-path",
-    "unknown-windows-fact-path",
-    "unknown-unc-fact-path",
+    "absolute-record-warning",
   ];
 
   for (const protocolMode of invalidModes) {

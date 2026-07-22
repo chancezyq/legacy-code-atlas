@@ -4,6 +4,7 @@
 
 - 仓库：[VHAINNOVATIONS/TheDailyPlan](https://github.com/VHAINNOVATIONS/TheDailyPlan)
 - 固定 commit：`e3571c8c3b1ee99e38f056f00d2189e9533f9cba`
+- 下载 archive SHA-256：`e60fe2983735a1e50e2886043938c58559bc1e797ed90e0216118ab50bb00749`
 - 代码年代：仓库中的 SQL Server schema 脚本来自 2010 年；仓库最后一次提交为 2017 年。
 - 架构：Struts 2、JSP、Java、iBATIS 2、SQL Server。
 - 关键文件：`LegacyApp/tdpWeb/src/main/resources/struts.xml`、`LegacyApp/tdpWeb/src/main/resources/sqlmaps/EventSQL.xml`、`LegacyApp/tdpWeb/src/test/resources/net.sourceforge.jtds-schema.sql`。
@@ -20,7 +21,7 @@
 源码文件（Java/JSP/XML/SQL）：758
 源码行数：84,169
 Graph：7,186 nodes / 8,213 edges
-首次扫描耗时：约 0.97 s（本机 Node.js 20，单次测量）
+首次扫描耗时：约 1.06 s（本机 Node.js v25.9.0，单次测量）
 ```
 
 节点类型包含 1 个 procedure、71 个 iBATIS statement、37 个 route、47 个 Spring bean 和 11 个 table。关系类型包含 24 个 `dispatches_to`、25 个 `maps_to`、1 个 `calls_procedure`、27 个 `uses_statement` 和 27 个 `writes_to`。
@@ -42,6 +43,6 @@ Graph：7,186 nodes / 8,213 edges
 
 ## 结果
 
-通用测试：`426 tests, 385 pass, 0 fail, 41 Windows-only skip`。冷 benchmark（500 组 fixture、3 samples）结果：baseline 中位数 `15,893.76 ms`，candidate 中位数 `887.96 ms`，speedup `17.90x`，超过项目要求的 `3x` 门槛。
+本次兼容性回归验证：`509 tests, 454 pass, 0 fail, 55 Windows-only skip`。冷 benchmark（500 组 fixture、3 samples）结果：baseline 中位数 `16,473.24 ms`，candidate 中位数 `911.10 ms`，speedup `18.08x`，超过项目要求的 `3x` 门槛。当前 Windows 安装器套件共 `65` 项；真实 Windows 安装器场景仍需在 Windows PowerShell 5.1 上达到 `65 pass, 0 skip`，这里的 macOS 结果不能替代该门禁。
 
 该样本仍有 7 条合理 warning，主要来自没有源码的 `com.opensymphony.xwork2.ActionSupport`、外部 DWR/CXF servlet、注释中的脚本引用，以及没有请求方法提示的 `PdfServlet`。这些 warning 已人工区分为外部依赖或不确定运行时行为，不把它们强行连成业务关系。

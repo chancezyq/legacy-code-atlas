@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 
 function markdownSection(markdown, heading) {
   const lines = markdown.split(/\r?\n/);
@@ -14,21 +11,109 @@ function markdownSection(markdown, heading) {
   return lines.slice(start, end).join("\n");
 }
 
-function exportedConst(source, name) {
-  const start = source.indexOf(`export const ${name} =`);
-  assert.notEqual(start, -1, `missing exported const: ${name}`);
-  const next = source.indexOf("\nexport const ", start + 1);
-  return source.slice(start, next === -1 ? source.length : next);
-}
-
-test("legacy query command templates contain no authored eager shell blocks", async () => {
+test("legacy query command templates use the structured query-file protocol", async () => {
   const find = await readFile(new URL("../integrations/opencode/commands/legacy-find.md", import.meta.url), "utf8");
   const table = await readFile(new URL("../integrations/opencode/commands/legacy-table.md", import.meta.url), "utf8");
 
-  assert.equal(find.includes("!`"), false);
-  assert.equal(table.includes("!`"), false);
-  assert.match(find, /legacy_atlas_trace_feature/);
-  assert.match(table, /legacy_atlas_trace_table/);
+  for (const [name, content, command] of [
+    ["find", find, "trace-feature"],
+    ["table", table, "trace-table"],
+  ]) {
+    assert.equal(content.includes("!`"), false, `${name} must not eagerly execute shell blocks`);
+    assert.doesNotMatch(content, /legacy_atlas_/);
+    assert.doesNotMatch(content, /\bBun\b/);
+    assert.equal(
+      [...content.matchAll(/\$ARGUMENTS/g)].length,
+      1,
+      `${name} must expose its command query exactly once`,
+    );
+    assert.match(content, /<query>\r?\n\$ARGUMENTS\r?\n<\/query>/);
+    assert.match(content, /structured\s+`write`/i);
+    assert.match(content, /\.legacy-code-atlas[\\/]query\.txt/);
+    assert.match(content, /metadata-only[^\n]+(?:existence|exists)/i);
+    assert.match(content, /if[^\n]+index[^\n]+missing[^\n]+`\/understand`[^\n]+by itself/i);
+    assert.match(content, /structured\s+`write`[^\n]+(?:selected|derived)[^\n]+(?:candidate|identifier)/i);
+    assert.match(content, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?/);
+    assert.match(content, new RegExp(`${command}[^\\n]+--query-file`));
+    assert.match(content, /do not[^\n]*(?:shell|interpolate|insert)[^\n]*(?:question|message|argument)/i);
+
+    const shellBlocks = [...content.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)];
+    assert.equal(shellBlocks.length, 2, `${name} must contain fixed preflight and trace shell blocks`);
+    for (const shellBlock of shellBlocks) assert.doesNotMatch(shellBlock[1], /\$ARGUMENTS|<\/?query>/i);
+    assert.equal(
+      shellBlocks[0][1].trim(),
+      'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"',
+      `${name} first shell block must prepare a safe query file`,
+    );
+    assert.equal(
+      shellBlocks[1][1].trim(),
+      `node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" ${command} "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok`,
+      `${name} shell block must contain only the fixed CLI command`,
+    );
+  }
+});
+
+test("OpenCode trace commands preserve no-match output for bounded fallbacks", async () => {
+  const files = [
+    "../integrations/opencode/skills/understand/SKILL.md",
+    "../integrations/opencode/AGENTS.fragment.md",
+    "../integrations/opencode/commands/legacy-find.md",
+    "../integrations/opencode/commands/legacy-table.md",
+  ];
+
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(source, /--query-file[^\n]+--no-match-ok/);
+    assert.match(source, /no-match[^\n]+(?:exit|status)[^\n]+0|exit[^\n]+0[^\n]+no-match/i);
+  }
+});
+
+test("OpenCode prepares the query file before every structured write", async () => {
+  const files = [
+    "../integrations/opencode/skills/understand/SKILL.md",
+    "../integrations/opencode/commands/legacy-find.md",
+    "../integrations/opencode/commands/legacy-table.md",
+  ];
+  const prepare = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"';
+
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    const prepareIndex = source.indexOf(prepare);
+    const writeIndex = source.indexOf("structured `write`", prepareIndex);
+    const traceIndex = source.indexOf("--query-file", writeIndex);
+    assert.notEqual(prepareIndex, -1, `${file} must run the fixed query-file preflight`);
+    assert.notEqual(writeIndex, -1, `${file} must structured-write after preflight`);
+    assert.notEqual(traceIndex, -1, `${file} must trace after structured write`);
+    assert.ok(prepareIndex < writeIndex && writeIndex < traceIndex, `${file} must prepare -> write -> trace`);
+  }
+});
+
+test("structured write receives a project-relative path while Shell receives $PWD", async () => {
+  const files = [
+    "../integrations/opencode/skills/understand/SKILL.md",
+    "../integrations/opencode/AGENTS.fragment.md",
+    "../integrations/opencode/commands/legacy-find.md",
+    "../integrations/opencode/commands/legacy-table.md",
+  ];
+
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    const writeInstruction = source
+      .split(/\r?\n/)
+      .find((line) => /structured\s+`write`/i.test(line));
+
+    assert.ok(writeInstruction, `${file} must define a structured write instruction`);
+    assert.match(
+      writeInstruction,
+      /project-relative[^\n]+`\.legacy-code-atlas\/query\.txt`/i,
+    );
+    assert.doesNotMatch(writeInstruction, /\$PWD/);
+    assert.match(source, /never pass[^\n]+literal[^\n]+`\$PWD`[^\n]+`write`/i);
+    assert.match(
+      source,
+      /--query-file\s+"\$PWD\/\.legacy-code-atlas\/query\.txt"/,
+    );
+  }
 });
 
 test("understand is a no-argument OpenCode Agent Skill", async () => {
@@ -40,67 +125,201 @@ test("understand is a no-argument OpenCode Agent Skill", async () => {
   assert.match(frontmatter[1], /^description:\s*\S.+$/m);
   assert.equal(understand.includes("$ARGUMENTS"), false);
   assert.equal(understand.includes("!`"), false);
+  assert.doesNotMatch(understand, /legacy_atlas_/);
   assert.match(understand, /only when the user invokes `\/understand` with no arguments/i);
-  assert.match(understand, /immediately call `legacy_atlas_analyze`/i);
+  assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+analyze\s+"?\$PWD"?/i);
+  assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+overview\s+"?\$PWD"?/i);
   assert.match(understand, /next ordinary message/i);
   assert.match(understand, /do not append[^\n]+`\/understand`/i);
 });
 
+test("understand gates overview on a separate successful analyze Shell call", async () => {
+  const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
+  const shellBlocks = [...understand.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)];
+  const analyze = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"';
+  const overview = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"';
+  const analyzeBlock = shellBlocks.find((match) => match[1].trim() === analyze);
+  const overviewBlock = shellBlocks.find((match) => match[1].trim() === overview);
+
+  assert.ok(analyzeBlock, "analyze must be one fixed Shell call");
+  assert.ok(overviewBlock, "overview must be a separate fixed Shell call");
+  assert.ok(analyzeBlock.index < overviewBlock.index, "overview must follow analyze");
+  const gate = understand.slice(analyzeBlock.index, overviewBlock.index + overviewBlock[0].length);
+  assert.match(gate, /if and only if[^\n]+(?:analyze|call)[^\n]+(?:exit|status)[^\n]+0[^\n]+(?:second|separate)[^\n]+(?:call|overview)/i);
+  assert.match(understand, /if either[^\n]+fails?[^\n]+stop[^\n]+report[^\n]+(?:do not|never)[^\n]+(?:claim|report)[^\n]+(?:refreshed|success)/i);
+});
+
+test("understand metadata covers post-index questions across turns", async () => {
+  const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
+  const frontmatter = understand.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+
+  assert.ok(frontmatter, "SKILL.md must start with YAML frontmatter");
+  assert.match(frontmatter[1], /description:[^\n]+after[^\n]+`?\/understand`?[^\n]+succeed[^\n]+ordinary[^\n]+question/i);
+  assert.match(frontmatter[1], /indexed[^\n]+legacy[^\n]+project/i);
+  assert.match(frontmatter[1], /(?:across|subsequent)[^\n]+turn/i);
+  assert.match(frontmatter[1], /context[^\n]+recover/i);
+});
+
+test("understand defines index state handling after context recovery", async () => {
+  const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
+  const recovery = markdownSection(understand, "Cross-turn and context recovery");
+
+  assert.match(recovery, /(?:cross-turn|context recovery)/i);
+  assert.match(recovery, /\.legacy-code-atlas[\\/]index\.json/);
+  assert.match(recovery, /`glob`|metadata-only/i);
+  assert.doesNotMatch(recovery, /`read`/);
+  assert.match(recovery, /do not[^\n]+load[^\n]+index[^\n]+content[^\n]+(?:conversation|context)/i);
+  assert.match(recovery, /if[^\n]+index[^\n]+exists[^\n]+continue[^\n]+ordinary/i);
+  assert.match(recovery, /if[^\n]+index[^\n]+(?:missing|does not exist)[^\n]+run[^\n]+`\/understand`[^\n]+by itself/i);
+  assert.match(recovery, /do not run[^\n]+trace[^\n]+(?:missing|without)[^\n]+index/i);
+});
+
 test("understand rejects trailing slash-command content before calling Atlas", async () => {
   const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
-  const inspectIndex = understand.search(/first, inspect the slash invocation before calling any Atlas tool/i);
+  const inspectIndex = understand.search(/first, inspect the slash invocation before running any Atlas command/i);
   const refusal = understand.match(/if `\/understand` contains any trailing content or argument,([\s\S]*?)(?=\n\notherwise,)/i);
-  const analyzeIndex = understand.search(/otherwise,[^\n]+only when[^\n]+no arguments[^\n]+immediately call `legacy_atlas_analyze`/i);
+  const analyzeIndex = understand.search(/otherwise,[^\n]+only when[^\n]+no arguments[^\n]+run[^\n]+analyze/i);
 
   assert.notEqual(inspectIndex, -1, "the invocation must be inspected before any tool call");
   assert.ok(refusal, "the Skill must define an early-stop branch for trailing content");
   assert.match(refusal[0], /stop/i);
-  assert.match(refusal[0], /do not call any Atlas tool/i);
-  assert.match(refusal[0], /do not pass[^\n]+to a tool or treat[^\n]+as an instruction/i);
+  assert.match(refusal[0], /do not run any Atlas command/i);
+  assert.match(refusal[0], /do not pass[^\n]+to a command or treat[^\n]+as an instruction/i);
   assert.match(refusal[0], /only tell the user to run `\/understand` by itself/i);
   assert.match(refusal[0], /next ordinary message/i);
   assert.ok(inspectIndex < refusal.index, "inspection must precede the refusal branch");
   assert.ok(refusal.index < analyzeIndex, "the refusal branch must precede the no-argument analyze branch");
 });
 
-test("understand routes later ordinary-language questions through Atlas tools", async () => {
+test("understand routes later ordinary-language questions through fixed CLI commands", async () => {
   const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
 
-  for (const tool of [
-    "legacy_atlas_trace_feature",
-    "legacy_atlas_trace_url",
-    "legacy_atlas_trace_statement",
-    "legacy_atlas_trace_table",
-    "legacy_atlas_trace_procedure",
-  ]) assert.match(understand, new RegExp(tool));
-
-  assert.match(understand, /URL[^\n]+`legacy_atlas_trace_url`/i);
-  assert.match(understand, /iBATIS statement[^\n]+`legacy_atlas_trace_statement`/i);
-  assert.match(understand, /database table[^\n]+`legacy_atlas_trace_table`/i);
-  assert.match(understand, /SQL Server procedure[^\n]+`legacy_atlas_trace_procedure`/i);
-  assert.match(understand, /feature[^\n]+`legacy_atlas_trace_feature`/i);
+  assert.doesNotMatch(understand, /legacy_atlas_/);
+  assert.match(understand, /structured\s+`write`/i);
+  assert.match(understand, /\.legacy-code-atlas[\\/]query\.txt/);
+  assert.match(understand, /write[^\n]+(?:selected|derived)[^\n]+(?:candidate|identifier)/i);
+  for (const command of [
+    "trace-url",
+    "trace-statement",
+    "trace-table",
+    "trace-procedure",
+    "trace-feature",
+  ]) {
+    assert.match(understand, new RegExp(`${command}[^\\n]+--query-file`));
+  }
+  assert.match(understand, /URL[^\n]+trace-url/i);
+  assert.match(understand, /iBATIS statement[^\n]+trace-statement/i);
+  assert.match(understand, /database table[^\n]+trace-table/i);
+  assert.match(understand, /SQL Server procedure[^\n]+trace-procedure/i);
+  assert.match(understand, /feature[^\n]+trace-feature/i);
 });
 
-test("project Agent guidance includes every identifier-specific trace tool", async () => {
+test("OpenCode guidance derives bounded source-language candidates for natural questions", async () => {
+  const files = [
+    "../integrations/opencode/skills/understand/SKILL.md",
+    "../integrations/opencode/AGENTS.fragment.md",
+    "../integrations/opencode/commands/legacy-find.md",
+  ];
+
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(source, /(?:concise|short)[^\n]+source-language[^\n]+(?:candidate|term)/i);
+    assert.match(source, /translate[^\n]+(?:question|business terms?)[^\n]+source[^\n]+language/i);
+    assert.match(source, /(?:at most|maximum of)[^\n]+two[^\n]+alternative[^\n]+candidate/i);
+    assert.match(source, /structured\s+`write`[^\n]+(?:candidate|term)/i);
+    assert.doesNotMatch(source, /write[^\n]+complete[^\n]+question[^\n]+exactly as received/i);
+  }
+
+  const skill = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /explicit[^\n]+(?:URL|statement)[^\n]+(?:preserve|exact)/i);
+  assert.match(skill, /订单审核功能在哪里？[^\n]+OrderAudit/i);
+  assert.match(skill, /report[^\n]+candidate/i);
+  assert.match(skill, /only[^\n]+natural-language[^\n]+alternative[^\n]+candidate/i);
+  assert.match(skill, /(?:do not|never)[^\n]+(?:alter|translate|replace)[^\n]+explicit[^\n]+identifier/i);
+});
+
+test("table command preserves explicit identifiers while translating natural descriptions", async () => {
+  const table = await readFile(new URL("../integrations/opencode/commands/legacy-table.md", import.meta.url), "utf8");
+
+  assert.match(table, /explicit[^\n]+table[^\n]+(?:preserve|exact)/i);
+  assert.match(table, /natural-language[^\n]+translate[^\n]+source[^\n]+language/i);
+  assert.match(table, /structured\s+`write`[^\n]+(?:candidate|identifier)/i);
+  assert.match(table, /(?:at most|maximum of)[^\n]+two[^\n]+alternative[^\n]+candidate/i);
+  assert.match(table, /only[^\n]+natural-language[^\n]+alternative[^\n]+candidate/i);
+  assert.match(table, /(?:do not|never)[^\n]+(?:alter|translate|replace)[^\n]+explicit[^\n]+identifier/i);
+  assert.doesNotMatch(table, /write[^\n]+complete[^\n]+(?:text|content)[^\n]+exactly as received/i);
+});
+
+test("README compatibility requirements name every host capability used by the Skill", async () => {
+  const readmes = await Promise.all([
+    "../README.md",
+    "../README_EN.md",
+  ].map((file) => readFile(new URL(file, import.meta.url), "utf8")));
+
+  for (const readme of readmes) {
+    assert.match(readme, /structured\s+`write`/i);
+    assert.match(readme, /metadata-only[^\n]+(?:existence|存在)/i);
+  }
+});
+
+test("OpenCode guidance defines Shell semantics and large-scan timeout requirements", async () => {
+  const skill = await readFile(
+    new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url),
+    "utf8",
+  );
+  const documents = await Promise.all([
+    "../README.md",
+    "../README_EN.md",
+    "../docs/opencode.md",
+    "../docs/opencode-en.md",
+  ].map((file) => readFile(new URL(file, import.meta.url), "utf8")));
+
+  for (const source of [skill, ...documents]) {
+    assert.match(source, /(?:PowerShell|POSIX)[^\n]+(?:Git Bash|POSIX)[^\n]+\$HOME[^\n]+\$PWD/i);
+    assert.match(source, /cmd\.exe[^\n]+(?:unsupported|不支持)/i);
+    assert.match(source, /(?:maximum|max(?:imum)?|最长)[^\n]+(?:supported|支持)[^\n]+timeout|timeout[^\n]+(?:maximum|max(?:imum)?|最长)[^\n]+(?:supported|支持)/i);
+    assert.match(source, /background[^\n]+(?:wait|等待)/i);
+    assert.match(source, /(?:short|短)[^\n]+(?:default|默认)[^\n]+timeout|(?:default|默认)[^\n]+timeout[^\n]+(?:short|短)/i);
+  }
+
+  assert.match(skill, /(?:tool-call metadata|tool metadata)[^\n]+(?:not|do not)[^\n]+(?:command string|command)/i);
+  assert.match(skill, /(?:do not|never)[^\n]+invent[^\n]+(?:metadata|field)/i);
+  assert.match(skill, /wait[^\n]+(?:analyze|call)[^\n]+(?:exit|finish|complete)[^\n]+overview/i);
+});
+
+test("project Agent guidance includes every identifier-specific CLI trace command", async () => {
   const agents = await readFile(new URL("../integrations/opencode/AGENTS.fragment.md", import.meta.url), "utf8");
 
-  for (const tool of [
-    "legacy_atlas_trace_url",
-    "legacy_atlas_trace_statement",
-    "legacy_atlas_trace_procedure",
-    "legacy_atlas_trace_table",
-  ]) assert.match(agents, new RegExp(tool));
+  assert.doesNotMatch(agents, /legacy_atlas_/);
+  assert.match(agents, /structured\s+`write`/i);
+  assert.match(agents, /\.legacy-code-atlas[\\/]query\.txt/);
+  assert.match(agents, /metadata-only[^\n]+(?:existence|exists)/i);
+  assert.match(agents, /if[^\n]+index[^\n]+missing[^\n]+`\/understand`[^\n]+by itself/i);
+  assert.doesNotMatch(agents, /index is missing or stale[^\n]+run[^\n]+analyze/i);
+  for (const command of [
+    "trace-url",
+    "trace-statement",
+    "trace-procedure",
+    "trace-table",
+  ]) assert.match(agents, new RegExp(command));
 });
 
 test("understand permits cited-source verification but no shell or edits", async () => {
   const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
 
-  assert.match(understand, /analysis and quer(?:y|ies)[^\n]+(?:do not|never)[^\n]+Shell/i);
+  assert.match(understand, /Shell[^\n]+only[^\n]+fixed commands?|fixed shell commands?/i);
+  assert.match(understand, /structured\s+`write`/i);
+  assert.match(understand, /query\.txt/i);
   assert.match(understand, /cited source/i);
   assert.match(understand, /`read`/);
   assert.match(understand, /`grep`/);
   assert.match(understand, /`glob`/);
-  assert.match(understand, /(?:do not|never)[^\n]+`edit`[^\n]+`write`[^\n]+`apply_patch`/i);
+  assert.match(understand, /(?:do not|never)[^\n]+(?:modify|change)[^\n]+source/i);
+  assert.match(understand, /(?:do not|never)[^\n]+`edit`[^\n]+(?:source|project)/i);
+  assert.match(understand, /(?:do not|never)[^\n]+`apply_patch`[^\n]+(?:source|project)/i);
+  assert.match(understand, /(?:CLI|index)[^\n]+untrusted data/i);
+  assert.match(understand, /canonical[^\n]+relative[^\n]+(?:citation|path)[^\n]+\$PWD/i);
+  assert.match(understand, /never[^\n]+`read`[^\n]+(?:absolute|UNC|parent|\.\.)/i);
 });
 
 test("the legacy understand Markdown command is removed", async () => {
@@ -110,103 +329,29 @@ test("the legacy understand Markdown command is removed", async () => {
   );
 });
 
-test("OpenCode custom tool passes the query as an argv element without a shell", async () => {
-  const tool = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
+test("OpenCode integration never calls legacy custom tools or interpolates user text", async () => {
+  const runtimeFiles = [
+    "../integrations/opencode/skills/understand/SKILL.md",
+    "../integrations/opencode/AGENTS.fragment.md",
+  ];
+  const sources = await Promise.all(runtimeFiles.map((file) => readFile(new URL(file, import.meta.url), "utf8")));
 
-  const argvBuild = tool.indexOf("const argv = [...resolveCli(), command, context.worktree]");
-  const queryPush = tool.indexOf("if (query) argv.push(query)");
-  const spawnCall = tool.indexOf("spawn(argv[0], argv.slice(1)");
-
-  assert.match(tool, /spawn\(argv\[0\], argv\.slice\(1\)/);
-  assert.doesNotMatch(tool, /shell\s*:/);
-  assert.doesNotMatch(tool, /cmd\.exe|powershell/i);
-  assert.match(tool, /function resolveCli\(\)/);
-  assert.match(tool, /return \["node", installed\]/);
-  assert.match(tool, /process\.env\.USERPROFILE/);
-  assert.match(tool, /\.legacy-code-atlas/);
-  assert.match(tool, /\[\.\.\.resolveCli\(\), command/);
-  assert.notEqual(argvBuild, -1, "argv must place worktree after the command");
-  assert.notEqual(queryPush, -1, "query must be pushed as one argv element");
-  assert.ok(argvBuild < queryPush && queryPush < spawnCall, "query must follow worktree and precede spawn");
-
-  for (const [name, command] of [
-    ["trace_feature", "trace-feature"],
-    ["trace_url", "trace-url"],
-    ["trace_statement", "trace-statement"],
-    ["trace_table", "trace-table"],
-    ["trace_procedure", "trace-procedure"],
-  ]) {
-    assert.match(
-      exportedConst(tool, name),
-      new RegExp(`return runAtlas\\("${command}", args\\.query, context\\)`),
-    );
+  for (const source of sources) {
+    assert.doesNotMatch(source, /legacy_atlas_[A-Za-z0-9_]+/);
+    assert.doesNotMatch(source, /\bBun\b/);
+    assert.doesNotMatch(source, /\$ARGUMENTS/);
+    assert.doesNotMatch(source, /\$\{(?:query|arguments|user|message)\}/i);
   }
-
-  assert.match(tool, /export const analyze/);
-  assert.match(tool, /runAtlas\("analyze"/);
-  assert.match(tool, /runAtlas\("overview"/);
+  const skill = sources[0];
+  assert.match(skill, /never[^\n]*(?:interpolate|insert|embed)[^\n]*(?:user|question|message)[^\n]*(?:shell|command)/i);
+  assert.match(skill, /only fixed[^\n]+commands?/i);
 });
 
-test("OpenCode custom tool runs under Node without a Bun global", async () => {
-  const source = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
-
-  assert.doesNotMatch(source, /\bBun\b/);
-
-  const root = await mkdtemp(path.join(tmpdir(), "legacy-atlas-node-tool-"));
-  const home = path.join(root, "home");
-  const worktree = path.join(root, "project");
-  const cliDir = path.join(home, ".legacy-code-atlas", "bin");
-  const cli = path.join(cliDir, "legacy-code-atlas.mjs");
-  const toolModule = path.join(root, "legacy_atlas.mjs");
-  const originalUserProfile = process.env.USERPROFILE;
-
-  try {
-    await mkdir(cliDir, { recursive: true });
-    await mkdir(worktree, { recursive: true });
-    await writeFile(cli, "console.log(JSON.stringify(process.argv.slice(2)))\n", "utf8");
-    await writeFile(toolModule, source, "utf8");
-    process.env.USERPROFILE = home;
-
-    const tool = await import(`${pathToFileURL(toolModule).href}?test=${Date.now()}`);
-    const result = await tool.analyze.execute({}, {
-      worktree,
-      abort: new AbortController().signal,
-    });
-
-    assert.deepEqual(JSON.parse(result), ["overview", worktree]);
-  } finally {
-    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = originalUserProfile;
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("OpenCode custom tool loads without registry or network dependencies", async () => {
-  const tool = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
-
-  const staticImports = [...tool.matchAll(
-    /^\s*import(?:\s+[^"'`;]+?\s+from\s+)?["']([^"']+)["']/gm,
-  )].map((match) => match[1]);
-  const dynamicImports = [...tool.matchAll(
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-  )].map((match) => match[1]);
-  const imports = [...new Set([...staticImports, ...dynamicImports])].sort();
-
-  assert.deepEqual(imports, ["node:child_process", "node:fs", "node:path", "node:process"]);
-  assert.doesNotMatch(tool, /["']node:(?:http|https|net|tls|dns|dgram)(?:\/[^"']*)?["']/);
-  assert.doesNotMatch(tool, /\b(?:fetch|WebSocket|EventSource)\s*\(/);
-  assert.doesNotMatch(tool, /\bBun\b/);
-  assert.match(tool, /type:\s*["']string["']/);
-  assert.match(tool, /minLength:\s*1/);
-});
-
-test("OpenCode custom tool uses only the installer-owned CLI", async () => {
-  const tool = await readFile(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url), "utf8");
-
-  assert.doesNotMatch(tool, /LEGACY_CODE_ATLAS_CLI/);
-  assert.doesNotMatch(tool, /spawn\(["']legacy-code-atlas["']/);
-  assert.match(tool, /USERPROFILE/);
-  assert.match(tool, /bin["'],\s*["']legacy-code-atlas\.mjs/);
+test("OpenCode integration ships no TypeScript custom tool", async () => {
+  await assert.rejects(
+    access(new URL("../integrations/opencode/tools/legacy_atlas.ts", import.meta.url)),
+    (error) => error?.code === "ENOENT",
+  );
 });
 
 test("user documentation shows only standalone understand invocations", async () => {
@@ -249,11 +394,57 @@ test("README presents the three-step Windows workflow and installed paths", asyn
   assert.match(readme, /install\.ps1 -Uninstall/);
   assert.match(readme, /%USERPROFILE%\\\.legacy-code-atlas\\/);
   assert.match(readme, /%USERPROFILE%\\\.agents\\skills\\understand\\SKILL\.md/);
-  assert.match(readme, /%USERPROFILE%\\\.config\\opencode\\tools\\legacy_atlas\.ts/);
   assert.match(readme, /OPENCODE_CONFIG_DIR/);
   assert.match(readme, /configDir/);
+  assert.match(readme, /(?:不会|不再)[^\n]*(?:创建|安装|写入)[^\n]*legacy_atlas\.ts/i);
   assert.match(readme, /不联网/);
   assert.doesNotMatch(readme, /\$env:LEGACY_CODE_ATLAS_CLI|Copy-Item|npm link/);
+});
+
+test("user documentation describes the true Skill-only runtime and one-time legacy-tool retirement", async () => {
+  const documents = await Promise.all([
+    "../README.md",
+    "../README_EN.md",
+    "../docs/opencode.md",
+    "../docs/opencode-en.md",
+  ].map((file) => readFile(new URL(file, import.meta.url), "utf8")));
+
+  for (const document of documents) {
+    assert.match(document, /Skill-only/i);
+    assert.match(document, /\.legacy-code-atlas[\\/]query\.txt/);
+    assert.match(document, /--query-file/);
+    assert.match(document, /legacy_atlas\.ts/);
+    assert.match(document, /(?:retir|remove|移除|退役)/i);
+    assert.match(document, /(?:will not|does not|不会|不再)[^\n]*(?:create|install|write|创建|安装|写入)[^\n]*legacy_atlas\.ts/i);
+    assert.doesNotMatch(document, /(?:tombstone|占位)/i);
+    assert.doesNotMatch(document, /export \{\};/);
+    assert.match(document, /Bun is not defined/);
+    assert.match(document, /configDir/);
+    assert.match(document, /Get-FileHash/);
+    assert.match(document, /Select-String/);
+    assert.match(document, /worker failed/);
+    assert.match(document, /\/home\/\*/);
+    assert.match(document, /C:\\\\company\\\\app/);
+    assert.match(document, /(?:完全退出|fully exit)[^\n]*OpenCode/i);
+    assert.match(document, /(?:custom-tool|custom tool)[^\n]+(?:loader|加载器)/i);
+    assert.doesNotMatch(document, /query\.txt[^\n]+(?:user questions|用户问题)/i);
+  }
+
+  for (const guide of documents.slice(2)) {
+    assert.match(guide, /65 pass/);
+    assert.match(guide, /0 skip/);
+    assert.match(guide, /(?:不代表|does not claim|not evidence)/i);
+  }
+});
+
+test("compatibility design does not treat Understand-Anything as proof of Atlas host support", async () => {
+  const design = await readFile(
+    new URL("../docs/plans/2026-07-21-opencode-skill-compatibility-design.md", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(design, /already proven by Understand-Anything/i);
+  assert.match(design, /Understand-Anything[^\n]+(?:similar|partial)[^\n]+(?:not|cannot)[^\n]+(?:proof|validation)/i);
 });
 
 test("uninstall documentation distinguishes external owned files from the private runtime", async () => {
@@ -272,13 +463,13 @@ test("uninstall documentation distinguishes external owned files from the privat
   }
 });
 
-test("OpenCode recovery documentation uses manifest v2 owned files", async () => {
+test("OpenCode recovery documentation uses one-file manifest v3 ownership", async () => {
   const docs = await readFile(new URL("../docs/opencode.md", import.meta.url), "utf8");
-  const manifest = markdownSection(docs, "manifest v2");
+  const manifest = markdownSection(docs, "manifest v3");
 
   assert.match(docs, /OpenCode 1\.14\.49/);
   assert.match(manifest, /ConvertFrom-Json/);
-  assert.match(manifest, /legacy-code-atlas-install-v2/);
+  assert.match(manifest, /legacy-code-atlas-install-v3/);
   assert.match(manifest, /owner/);
   assert.match(manifest, /version/);
   assert.match(manifest, /ownedFiles/);
@@ -286,11 +477,11 @@ test("OpenCode recovery documentation uses manifest v2 owned files", async () =>
   assert.match(manifest, /path/);
   assert.match(manifest, /sha256/);
   assert.match(manifest, /agent-skill/);
-  assert.match(manifest, /opencode-tool/);
+  assert.doesNotMatch(manifest, /opencode-tool/);
   assert.match(manifest, /Test-Path -LiteralPath \(Join-Path \$HOME "\.legacy-code-atlas\\bin\\legacy-code-atlas\.mjs"\)/);
   assert.doesNotMatch(manifest, /commandTarget|toolTarget/);
   assert.match(manifest, /SHA-256/);
-  assert.match(docs, /v1[^\n]+(?:迁移|migrat)/i);
+  assert.match(docs, /v1\/v2[^\n]+(?:迁移|migrat|移除|退役)/i);
   assert.doesNotMatch(docs, /its own saved environment variable/);
 });
 
@@ -325,7 +516,7 @@ test("OpenCode guide defines the real Windows release gate", async () => {
   const releaseGate = markdownSection(docs, "真实 Windows 发布门禁");
 
   assert.match(releaseGate, /npm run test:installer:windows/);
-  assert.match(releaseGate, /50 pass/);
+  assert.match(releaseGate, /65 pass/);
   assert.match(releaseGate, /0 skip/);
   assert.match(releaseGate, /真实 Windows/);
   assert.match(releaseGate, /非 Windows[^\n]+skip/);

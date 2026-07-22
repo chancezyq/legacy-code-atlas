@@ -51,6 +51,37 @@ function mutateProtocolResult(result, mode) {
       result.record.facts = null;
       result.record.error = { name: "Error" };
       break;
+    case "absolute-record-warning":
+      result.record.warnings = ["parser warning at D:\\other-project\\secret.java"];
+      break;
+    case "absolute-valid-diagnostic": {
+      const diagnostics = [{
+        code: "parser-note",
+        relativePath: result.relativePath,
+        message: "failure at C:\\company\\legacy-project\\src\\Broken.java",
+      }];
+      result.diagnostics = diagnostics;
+      result.record.diagnostics = diagnostics;
+      break;
+    }
+    case "absolute-valid-error": {
+      const diagnostics = [{
+        code: "parser-error",
+        relativePath: result.relativePath,
+        parserKind: result.parserKind,
+        message: "parser failed",
+      }];
+      result.status = "error";
+      result.record.status = "error";
+      result.record.facts = null;
+      result.record.diagnostics = diagnostics;
+      result.diagnostics = diagnostics;
+      result.record.error = {
+        name: "Error",
+        message: "failure at /private/company/legacy-project/src/Broken.java",
+      };
+      break;
+    }
     case "unknown-posix-fact-path":
       result.record.facts.secret = "/private/other-project/secret.java";
       break;
