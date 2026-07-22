@@ -747,6 +747,7 @@ test("analyze rejects linked standard indexes without modifying their targets", 
 
 test("CLI ignores linked cache contents and replaces only the project-local cache entry", async (t) => {
   const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
   const atlasDirectory = path.join(project, ".legacy-code-atlas");
   const cachePath = path.join(atlasDirectory, "cache.json");
   const indexPath = path.join(atlasDirectory, "index.json");
