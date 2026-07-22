@@ -182,6 +182,59 @@ test("source-derived absolute-looking paths do not trigger worker failure", asyn
   assertPortableResults(results, [root]);
 });
 
+test("source-derived JSP parameter names do not trigger worker failure", async (t) => {
+  const { root, files } = await projectFiles(t, [[
+    "web/edit.jsp",
+    [
+      '<form action="/save">',
+      '  <input type="hidden" name="duration" value="30">',
+      '  <input type="hidden" name="worker" value="legacy">',
+      '  <input type="hidden" name="node" value="primary">',
+      "</form>",
+    ].join("\n"),
+  ]]);
+  let fallbacks = 0;
+
+  const results = await processFileBatches(plan(files), {
+    workers: 1,
+    workerUrl: delayedWorkerUrl,
+    async mainThreadProcessor(file, options) {
+      fallbacks += 1;
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.equal(fallbacks, 0);
+  assert.deepEqual(results[0].record.facts.requests[0].parameters, {
+    duration: "30",
+    worker: "legacy",
+    node: "primary",
+  });
+  assertPortableResults(results, [root]);
+});
+
+test("source-derived iBATIS path-like identifiers do not trigger worker failure", async (t) => {
+  const { root, files } = await projectFiles(t, [[
+    "sql/jobs.xml",
+    '<sqlMap><procedure id="/home/job">select 1</procedure></sqlMap>',
+  ]]);
+  let fallbacks = 0;
+
+  const results = await processFileBatches(plan(files), {
+    workers: 1,
+    workerUrl: delayedWorkerUrl,
+    async mainThreadProcessor(file, options) {
+      fallbacks += 1;
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.equal(fallbacks, 0);
+  assert.equal(results[0].record.facts.ibatis.statements[0].fullId, "/home/job");
+  assert.match(results[0].record.warnings[0], /statement \/home\/job/);
+  assertPortableResults(results, [root]);
+});
+
 test("a crashed batch is retried once on a fresh real worker", async (t) => {
   const control = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2));
   const { files } = await projectFiles(t, [
@@ -498,9 +551,6 @@ test("strict result and record protocol rejects malformed scheduler and graph da
     "missing-result-field",
     "extra-result-graph",
     "missing-record-field",
-    "deep-graph-builder",
-    "deep-worker-id",
-    "deep-timing",
     "invalid-parser-kind",
     "invalid-fingerprint",
     "invalid-metadata-shape",
@@ -508,7 +558,6 @@ test("strict result and record protocol rejects malformed scheduler and graph da
     "invalid-record-facts-array",
     "mismatched-diagnostics",
     "invalid-error-object",
-    "absolute-record-warning",
   ];
 
   for (const protocolMode of invalidModes) {
@@ -529,6 +578,33 @@ test("strict result and record protocol rejects malformed scheduler and graph da
 
       assert.equal(fallbacks, 1, `${protocolMode} bypassed worker isolation`);
       assertPortableResults(results, [root, "/private/other-project", "D:\\other-project", "\\\\server\\share"]);
+    });
+  }
+});
+
+test("source fact keys that resemble scheduler metadata remain inert data", async (t) => {
+  const protocolModes = ["deep-graph-builder", "deep-worker-id", "deep-timing"];
+
+  for (const protocolMode of protocolModes) {
+    await t.test(protocolMode, async (t) => {
+      const { root, files } = await projectFiles(t, [[
+        "src/Safe.java",
+        "class Safe {}",
+      ]]);
+      let fallbacks = 0;
+      const results = await processFileBatches(plan(files), {
+        workers: 1,
+        workerUrl: crashWorkerUrl,
+        workerData: { protocolMode },
+        async mainThreadProcessor(file, options) {
+          fallbacks += 1;
+          return readAndProcessFile(file, options);
+        },
+      });
+
+      assert.equal(fallbacks, 0);
+      assert.equal(Object.hasOwn(results[0].record.facts, "nested"), true);
+      assertPortableResults(results, [root]);
     });
   }
 });

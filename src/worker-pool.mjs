@@ -43,30 +43,6 @@ const RESULT_STATUSES = new Set([
   "unstable",
   "operational-error",
 ]);
-const FORBIDDEN_KEYS = new Set([
-  "graph",
-  "graphbuilder",
-  "node",
-  "nodes",
-  "edge",
-  "edges",
-  "worker",
-  "workers",
-  "workerid",
-  "workerindex",
-  "timing",
-  "timings",
-  "duration",
-  "durationms",
-  "elapsed",
-  "elapsedms",
-  "batchid",
-  "dispatchid",
-  "startedat",
-  "completedat",
-  "absolutepath",
-]);
-
 class StartupFailure extends Error {
   constructor() {
     super("worker startup failed");
@@ -103,10 +79,6 @@ function hasExactKeys(value, keys) {
   const expected = [...keys].sort(compareText);
   return actual.length === expected.length
     && actual.every((key, index) => key === expected[index]);
-}
-
-function normalizedKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function positiveInteger(name, value) {
@@ -215,9 +187,7 @@ function assertJsonSafe(value, ancestors = new Set()) {
     }
 
     for (const key of Reflect.ownKeys(value)) {
-      if (typeof key !== "string" || FORBIDDEN_KEYS.has(normalizedKey(key))) {
-        throw new WorkerFailure();
-      }
+      if (typeof key !== "string") throw new WorkerFailure();
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
         throw new WorkerFailure();
@@ -264,7 +234,6 @@ function assertNoAbsolutePathLeaks(result, pathVariants) {
   const operationalData = {
     diagnostics: result.diagnostics,
     recordDiagnostics: result.record?.diagnostics ?? [],
-    recordWarnings: result.record?.warnings ?? [],
     error: result.record?.error ?? null,
   };
   if (containsString(operationalData, (value) => pathVariants.some((candidate) => value.includes(candidate)))) {

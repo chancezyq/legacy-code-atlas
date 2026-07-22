@@ -43,6 +43,6 @@ Graph：7,186 nodes / 8,213 edges
 
 ## 结果
 
-本次兼容性回归验证：`509 tests, 454 pass, 0 fail, 55 Windows-only skip`。冷 benchmark（500 组 fixture、3 samples）结果：baseline 中位数 `16,473.24 ms`，candidate 中位数 `911.10 ms`，speedup `18.08x`，超过项目要求的 `3x` 门槛。当前 Windows 安装器套件共 `65` 项；真实 Windows 安装器场景仍需在 Windows PowerShell 5.1 上达到 `65 pass, 0 skip`，这里的 macOS 结果不能替代该门禁。
+本次兼容性回归验证：`528 tests, 468 pass, 0 fail, 60 Windows-only skip`。冷 benchmark（500 组 fixture、3 samples）结果：baseline 中位数 `16,081.13 ms`，candidate 中位数 `946.29 ms`，speedup `16.99x`，超过项目要求的 `3x` 门槛。当前 Windows 安装器套件共 `70` 项；真实 Windows 安装器场景仍需在 Windows PowerShell 5.1 上达到 `70 pass, 0 skip`，这里的 macOS 结果不能替代该门禁。
 
 该样本仍有 7 条合理 warning，主要来自没有源码的 `com.opensymphony.xwork2.ActionSupport`、外部 DWR/CXF servlet、注释中的脚本引用，以及没有请求方法提示的 `PdfServlet`。这些 warning 已人工区分为外部依赖或不确定运行时行为，不把它们强行连成业务关系。

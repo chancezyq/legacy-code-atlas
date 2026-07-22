@@ -52,9 +52,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 /understand
 ```
 
-等项目分析完成后，下一条普通消息不要带斜杠，直接提问。例如每次发送其中一条：
+Skill 会先运行只读的 OpenCode 兼容性检查 `doctor`，只有它以状态 `0` 结束后才运行 `analyze`；`analyze` 成功后才运行 `overview`。三个固定命令使用独立 Shell 调用，任一步失败都会停止，不会把旧索引说成刷新成功。`doctor` 不导入、执行、移动或删除任何 OpenCode tool，也不修改项目。
 
-Skill 会先单独运行 `analyze`；只有该 Shell 调用以状态 `0` 结束时，才会再用第二个独立 Shell 调用运行 `overview`。任一步失败都会停止，不会把旧索引说成刷新成功。
+等项目分析完成后，下一条普通消息不要带斜杠，直接提问。例如每次发送其中一条：
 
 ```text
 退款审核功能在哪里？
@@ -205,7 +205,7 @@ npm run benchmark
 
 它生成可重复的 JSP/Java/iBATIS/Struts fixture，分别运行冻结的 `0.1.0` baseline 和当前候选，运行前删除两边的 `.legacy-code-atlas`，并先验证两份 Graph 字节完全一致。默认门槛是候选中位数至少比 baseline 快 `3.00x`；可以用 `ATLAS_BENCH_MIN_SPEEDUP` 做本地诊断，但发布前不要降低门槛。真实公司项目仍需单独记录文件数、源码行数、机器配置和冷/热缓存结果。
 
-本次开发机验证的 baseline 中位数为 `16,473.24 ms`，candidate 中位数为 `911.10 ms`，加速 `18.08x`。
+本次开发机验证的 baseline 中位数为 `16,081.13 ms`，candidate 中位数为 `946.29 ms`，加速 `16.99x`。
 
 `ATLAS_BENCH_FILES=500` 表示 500 组生成 fixture，每组会生成多种源码文件；它用于稳定比较 baseline 和 candidate，不代表已经在 5 万个真实文件或 200 万行公司源码上完成容量验证。
 
@@ -225,43 +225,27 @@ npm run benchmark
 
 OpenCode 中没有入口时，先确认安装脚本显示成功，然后完全退出所有 OpenCode 进程再启动。安装脚本必须与 OpenCode 使用同一个 Windows 用户。公司 fork 无法按版本号判断时，请确认它能加载全局 Agent Skill，并允许 Skill 执行文档中列出的固定命令；不需要 custom tool 注册接口。
 
-如果看到 `Bun is not defined`，最可能的原因是 OpenCode 仍在加载旧版或重复的 `legacy_atlas.ts`，而不是当前 Skill 的运行时错误。先从最新源码目录重新运行 `install.ps1`。若旧文件由 v1/v2 manifest 拥有且哈希匹配，安装器会在迁移到 v3 时事务性移除；已缺失时会继续。已修改或 unowned 文件会被保留，安装器会显示路径并停止。manifest v3 不会记录 `opencode-tool`，可用诊断用的 `configDir` 检查已知候选位置：
+如果看到 `Bun is not defined`，最可能的原因是 OpenCode 仍在加载旧版、重复或缓存的 Atlas custom tool，而不是当前 Skill 的运行时错误。先从最新源码目录重新运行 `install.ps1`，再完全退出所有 OpenCode 进程并重新启动。`/understand` 会自动先运行下面这个只读检查，也可以在老项目根目录手工运行：
 
 ```powershell
-$ManifestPath = Join-Path $HOME ".legacy-code-atlas\.legacy-code-atlas-owner.json"
-$Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-$Manifest.owner
-$Manifest.version
-$Manifest.configDir
-$Manifest.ownedFiles | Format-Table kind, path, sha256
-
-$CandidateTools = @(
-    (Join-Path $Manifest.configDir "tools\legacy_atlas.ts")
-    (Join-Path $HOME ".config\opencode\tools\legacy_atlas.ts")
-)
-if ($env:OPENCODE_CONFIG_DIR) {
-    $CandidateTools += Join-Path $env:OPENCODE_CONFIG_DIR "tools\legacy_atlas.ts"
-}
-$CandidateTools | Select-Object -Unique | ForEach-Object {
-    if (Test-Path -LiteralPath $_ -PathType Leaf) {
-        $_
-        (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash
-        Select-String -LiteralPath $_ -Pattern "Bun|legacy_atlas_"
-    }
-}
+node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") doctor (Get-Location).Path
 ```
 
-成功安装后的 v3 `ownedFiles` 只应显示 `agent-skill`。如果候选位置仍存在 `legacy_atlas.ts`，先保留路径、哈希和来源，按[详细恢复说明](docs/opencode.md)确认它确实是旧 Atlas 文件并建立可恢复备份后再处理；不要盲目删除整个 `tools` 或配置目录。Node/runtime 可绕过 OpenCode 单独检查：
+`doctor` 会检查 `OPENCODE_CONFIG_DIR`、`%XDG_CONFIG_HOME%\opencode`（未设置时为 `%USERPROFILE%\.config\opencode`）、`%USERPROFILE%\.opencode`、有效安装 manifest 的 `configDir`，以及从当前项目向上到 worktree 根目录（含）各级的 `.opencode`。每个配置根只扫描 `tool` 和 `tools` 的直接子文件，扩展名限 `.js` 和 `.ts`；不会递归扫描、执行或加载它们。项目级位置只能在实际项目中确定，所以由运行时 `doctor` 检查，而不是只依赖安装器。
+
+发现冲突或无法完整通过兼容性检查时，`doctor` 以退出码 `4` 停止 `/understand`，并报告具体路径、分类和可取得的 SHA-256。先记录并备份该单个文件，核对路径、哈希和来源；只有确认它是旧 Atlas 文件且备份可恢复后，才移动或禁用报告的那个文件。绝不要删除整个 OpenCode 配置目录、`tool` 目录或 `tools` 目录。详细恢复步骤见 [OpenCode 安装与恢复](docs/opencode.md)。
+
+对 doctor 报告的单个文件可用以下只读命令复核；输入报告中的完整路径，不要改成整个目录：
 
 ```powershell
-node --version
-node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") analyze (Get-Location).Path
-node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") overview (Get-Location).Path
+$ReportedFile = Read-Host "doctor 报告的单个文件路径"
+Get-FileHash -LiteralPath $ReportedFile -Algorithm SHA256
+Select-String -LiteralPath $ReportedFile -Pattern "Bun|legacy_atlas_"
 ```
 
-如果直接 CLI 能运行而 `/understand` 仍失败，继续检查 OpenCode Shell 是否按 Windows PowerShell 兼容语义展开 `$HOME` 和 `$PWD`，实际 Skill 加载路径、Skill 缓存和 `configDir` 是否一致，公司的 proprietary custom-tool loader 是否错误地假定 Bun，以及 host 是否同时提供 structured `write` 和对 `.legacy-code-atlas/index.json` 的 metadata-only existence check。再次确认安装器和 OpenCode 使用同一个 Windows 账户，并彻底重启所有进程。
+`doctor` 结果干净只覆盖这些已知位置。公司的 proprietary custom-tool loader 可能使用额外路径或进程缓存；最终验收仍必须在公司电脑上从最新源码重装、终止每一个 OpenCode 进程、重新启动，然后运行 `/understand`。若仍失败，保留 doctor 报告和完整错误文本，再核对实际 Skill/tool 加载路径。
 
-旧版本 worker 曾把源码中合法的 `<url-pattern>/home/*</url-pattern>` 或 Java 字符串 `C:\\company\\app` 误判为路径泄漏，导致 `worker failed`。当前版本只在运行时诊断、parser warning 和序列化错误中检查这类绝对路径，源码事实会原样保留。若更新后仍出现该错误，先确认 runtime 和 Skill 都来自同一份最新安装，再保留完整错误文本供排查。
+旧版本 worker 曾把 JSP 中合法的字段名 `duration`、`worker`、`node` 误当成 worker metadata，也会把 parser warning 中来自 iBATIS 源码的 `/home/job` 标识符误判为机器路径，最终只显示 `worker failed`。当前版本把这些值作为源码数据保留，同时继续严格校验 worker 协议和运行时诊断；同一修复也保留 `<url-pattern>/home/*</url-pattern>` 和 Java 字符串 `C:\\company\\app`。若更新后仍出现该错误，先确认 runtime 和 Skill 来自同一份最新安装，再保留完整错误文本和触发文件类型供排查。
 
 第一次分析太慢时，先完善 `.legacy-code-atlasignore`，或者从一个业务子模块开始。查询“未找到”时，先重新单独运行一次：
 

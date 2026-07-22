@@ -29,12 +29,15 @@ The first message must be the command below with no argument or appended questio
 /understand
 ```
 
-The Skill runs these fixed commands as two separate Shell calls. It runs `overview` only after `analyze` exits with status `0`, and stops on either failure. It does not add user-provided text, paths, or extra flags to them:
+The Skill runs these fixed commands as three separate Shell calls. `doctor` is a read-only OpenCode compatibility preflight. It runs `analyze` only after `doctor` exits with status `0`, then runs `overview` only after `analyze` succeeds. Any failure stops the workflow instead of reporting a stale index as refreshed. The commands do not add user-provided text, paths, or extra flags:
 
 ```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"
 ```
+
+`doctor` never imports, executes, moves, or deletes an OpenCode tool and does not modify the project; it only scans directories with an entry limit and reads bounded candidate files. A conflict or incomplete compatibility check exits with status `4`, and the Skill stops. Unavailable worker threads are only a warning because the analyzer can fall back to the main thread.
 
 Wait for analysis to finish. Then send a separate normal message containing a business description, URL, iBATIS statement ID, SQL Server procedure, or table name. For example:
 
@@ -130,48 +133,60 @@ node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") --help
 
 Node.js must be version 20 or later. If the runtime works but `/understand` is missing, fully exit every OpenCode process and confirm that OpenCode and the installer use the same Windows account.
 
+## Compatibility doctor and recovery
+
+You can run the same read-only check manually from the legacy-project root:
+
+```powershell
+node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") doctor (Get-Location).Path
+```
+
+`doctor` checks these configuration roots:
+
+- `OPENCODE_CONFIG_DIR`, when set.
+- `%XDG_CONFIG_HOME%\opencode`, or `%USERPROFILE%\.config\opencode` when XDG is unset.
+- `%USERPROFILE%\.opencode`.
+- `configDir` from a valid `%USERPROFILE%\.legacy-code-atlas\.legacy-code-atlas-owner.json` manifest.
+- Every `.opencode` directory from the current project up to and including the detected worktree root. The installer cannot know which project will be opened later, so these project-level locations must be checked by runtime `doctor`.
+
+Under each configuration root, it inspects only direct `.js` and `.ts` children of `tool` and `tools`. It does not recurse into subdirectories, import candidates, or execute them. Each reported conflict includes one file path, classification, and an available SHA-256. Exit status `0` means no conflict and a complete check; status `4` means a conflict or an incomplete/blocked check. Use `--json` to save a machine-readable report.
+
+For recovery, first back up the reported individual file outside the Atlas runtime, then verify its complete path, SHA-256, and origin. Move or disable only that exact file, and only after confirming that it is an old Atlas artifact and the backup is restorable. When a hash is unavailable, preserve the path and evidence and establish provenance first. Never delete an entire OpenCode configuration, `tool`, or `tools` directory or clear unrelated company configuration and plugins.
+
+Use these read-only commands to verify the individual file in the report. Enter the complete reported file path, not a directory:
+
+```powershell
+$ReportedFile = Read-Host "Individual file path reported by doctor"
+Get-FileHash -LiteralPath $ReportedFile -Algorithm SHA256
+Select-String -LiteralPath $ReportedFile -Pattern "Bun|legacy_atlas_"
+```
+
+Local `doctor` covers only the known paths above. It cannot prove that a proprietary company fork has no additional loader paths or process cache. Final acceptance requires reinstalling from the latest source on the company computer, terminating every OpenCode process, restarting it, and running `/understand`; preserve the doctor report and complete error text if a problem remains.
+
 ## Troubleshooting `Bun is not defined`
 
 The current Skill and runtime do not reference Bun, and the installer no longer ships a custom tool. Therefore, the most likely cause of `Bun is not defined` is that OpenCode is still reading an older, cached, or duplicate `legacy_atlas.ts`. Diagnose it in this order:
 
-1. Run `install.ps1` again from the latest Atlas source. A v1/v2-owned tool whose hash still matches is retired transactionally; a missing file does not block migration. A modified or unowned file is preserved, its path is reported, and installation stops.
+1. Run `install.ps1` again from the latest Atlas source. A v1/v2 tool proven by its manifest path and matching hash is retired transactionally. A modified or unowned file is preserved and blocks installation.
 2. After a successful install, fully exit every OpenCode process before restarting it. Closing only the window may not clear all caches.
-3. Confirm that the manifest is v3 and `ownedFiles` contains exactly one `agent-skill` entry.
-4. Check candidate files using the manifest's diagnostic `configDir`, the default directory, and the current environment variable:
-
-```powershell
-$CandidateTools = @(
-    (Join-Path $Manifest.configDir "tools\legacy_atlas.ts")
-    (Join-Path $HOME ".config\opencode\tools\legacy_atlas.ts")
-)
-if ($env:OPENCODE_CONFIG_DIR) {
-    $CandidateTools += Join-Path $env:OPENCODE_CONFIG_DIR "tools\legacy_atlas.ts"
-}
-$CandidateTools | Select-Object -Unique | ForEach-Object {
-    if (Test-Path -LiteralPath $_ -PathType Leaf) {
-        $_
-        (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash
-        Select-String -LiteralPath $_ -Pattern "Bun|legacy_atlas_"
-    }
-}
-```
-
-If any location contains `legacy_atlas.ts`, record its path, provenance, and SHA-256 before doing anything else. Do not delete or empty a whole `tools` directory; it may contain company configuration or another plugin. Handle an exact file only after confirming that it is an old Atlas artifact and making a recoverable backup. If no known candidate contains the old file but the error remains, inspect the company's actual loaded configuration directory, process cache, and proprietary custom-tool loader.
+3. Run `doctor` from the legacy-project root and back up and verify each reported file; do not delete directories blindly.
+4. If known locations are clean but the error remains, inspect the company fork's actual loader paths, process cache, and whether its proprietary custom-tool loader still assumes Bun.
 
 From the legacy-project root, check the Node runtime directly to distinguish an analyzer failure from an OpenCode Skill/cache problem:
 
 ```powershell
+node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") doctor (Get-Location).Path
 node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") analyze (Get-Location).Path
 node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") overview (Get-Location).Path
 ```
 
-If the direct CLI succeeds while the OpenCode Skill still fails, verify Windows PowerShell-compatible Shell expansion of `$HOME` and `$PWD`; inspect the actual Skill loading path, Skill cache, and `configDir`; check whether the proprietary custom-tool loader assumes Bun; and confirm that the host provides both structured `write` and a metadata-only existence check for `.legacy-code-atlas/index.json`. Also confirm that OpenCode and the installer use the same Windows account.
+Continue to the manual `analyze` and `overview` commands only after `doctor` returns `0`. If the direct CLI succeeds while the OpenCode Skill still fails, verify Windows PowerShell-compatible Shell expansion of `$HOME` and `$PWD`; inspect the actual Skill loading path, Skill cache, and `configDir`; and confirm that the host provides both structured `write` and a metadata-only existence check for `.legacy-code-atlas/index.json`. Also confirm that OpenCode and the installer use the same Windows account.
 
 ## `worker failed` and source paths
 
-An older worker recursively inspected every string in parsed results and incorrectly classified legitimate source content as a machine-path leak, including `<url-pattern>/home/*</url-pattern>` and the Java string `C:\\company\\app`. Both the worker and main-thread fallback then failed and surfaced only `worker failed`.
+An older worker treated legitimate JSP field names such as `duration`, `worker`, and `node` as worker metadata. It could also misclassify the iBATIS source identifier `/home/job` quoted in a parser warning as a machine path, causing `worker failed`.
 
-The current version checks absolute paths only in runtime diagnostics, parser warnings, and serialized errors. Source-derived URLs, SQL, configuration values, and Java strings remain intact, so the fix does not reduce JSP, Struts, iBATIS, or procedure-analysis accuracy. If `worker failed` persists after updating, reproduce it with the direct CLI above and preserve complete stdout/stderr, the project root, and the triggering file type. Do not execute project code or connect to SQL Server.
+The current version preserves those values as source data while retaining strict worker-protocol, runtime-diagnostic, and serialized-error validation; the same fix also preserves `<url-pattern>/home/*</url-pattern>` and the Java string `C:\\company\\app`. The fix does not reduce JSP, Struts, iBATIS, or procedure-analysis accuracy. If `worker failed` persists after updating, reproduce it with the direct CLI above and preserve complete stdout/stderr, the project root, and the triggering file type. Do not execute project code or connect to SQL Server.
 
 ## Updates and modified files
 
@@ -239,7 +254,7 @@ Before a release, run this on real Windows using the built-in Windows PowerShell
 npm run test:installer:windows
 ```
 
-The current suite contains 65 tests. The release gate passes only with `65 pass` and `0 skip`. Non-Windows systems skip the real installer scenarios. Those runs are useful for development syntax checks but are not evidence that the Windows release gate passed.
+The current suite contains 70 tests. The release gate passes only with `70 pass` and `0 skip`. Non-Windows systems skip the real installer scenarios. Those runs are useful for development syntax checks but are not evidence that the Windows release gate passed.
 
 ## Large projects and sensitive data
 

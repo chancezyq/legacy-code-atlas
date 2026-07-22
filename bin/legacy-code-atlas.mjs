@@ -14,11 +14,13 @@ import {
 } from "../src/index-validation.mjs";
 import { searchGraph, traceFeature, traceProcedure, traceStatement, traceTable, traceUrl } from "../src/query.mjs";
 import { renderInlineText, renderTraceMarkdown } from "../src/render.mjs";
+import { inspectOpenCodeCompatibility, renderOpenCodeDoctor } from "../src/opencode-doctor.mjs";
 import { replaceUnsafeTextControls } from "../src/text-safety.mjs";
 
 const HELP = `Legacy Code Atlas
 
 Usage:
+  legacy-code-atlas doctor <project> [--json]
   legacy-code-atlas analyze <project> [--output <index.json>] [--json]
   legacy-code-atlas prepare-query <project>
   legacy-code-atlas overview <project-or-index> [--json]
@@ -62,6 +64,7 @@ function parseArguments(argv) {
     if (argv[index] === "--json") json = true;
     else if (argv[index] === "--output") {
       output = argv[index + 1] ?? "";
+      if (!output || output.startsWith("--")) throw new Error("--output 缺少输出路径");
       index += 1;
     } else if (argv[index] === "--query-file") {
       if (queryFile !== null) throw new Error("--query-file 不能重复使用");
@@ -391,6 +394,18 @@ async function main() {
   }
   if (noMatchOk && queryFile === null) {
     throw new Error("--no-match-ok 只能与 --query-file 一起使用");
+  }
+
+  if (command === "doctor") {
+    if (queryParts.length > 0 || output || queryFile !== null || noMatchOk) {
+      throw new Error("doctor 不接受额外参数");
+    }
+    const report = await inspectOpenCodeCompatibility(input);
+    process.stdout.write(json
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : renderOpenCodeDoctor(report));
+    if (!report.ok) process.exitCode = 4;
+    return;
   }
 
   if (command === "prepare-query") {

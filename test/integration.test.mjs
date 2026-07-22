@@ -127,10 +127,27 @@ test("understand is a no-argument OpenCode Agent Skill", async () => {
   assert.equal(understand.includes("!`"), false);
   assert.doesNotMatch(understand, /legacy_atlas_/);
   assert.match(understand, /only when the user invokes `\/understand` with no arguments/i);
+  assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+doctor\s+"?\$PWD"?/i);
   assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+analyze\s+"?\$PWD"?/i);
   assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+overview\s+"?\$PWD"?/i);
   assert.match(understand, /next ordinary message/i);
   assert.match(understand, /do not append[^\n]+`\/understand`/i);
+});
+
+test("understand gates analysis on a separate successful doctor Shell call", async () => {
+  const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
+  const shellBlocks = [...understand.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)];
+  const doctor = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"';
+  const analyze = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"';
+  const doctorBlock = shellBlocks.find((match) => match[1].trim() === doctor);
+  const analyzeBlock = shellBlocks.find((match) => match[1].trim() === analyze);
+
+  assert.ok(doctorBlock, "doctor must be one fixed Shell call");
+  assert.ok(analyzeBlock, "analyze must be one fixed Shell call");
+  assert.ok(doctorBlock.index < analyzeBlock.index, "doctor must precede analyze");
+  const gate = understand.slice(doctorBlock.index, analyzeBlock.index + analyzeBlock[0].length);
+  assert.match(gate, /if and only if[^\n]+doctor[^\n]+(?:exit|status)[^\n]+0[^\n]+analyze/i);
+  assert.match(gate, /(?:read-only|does not (?:modify|delete|move))[^\n]+(?:OpenCode|tool|config)/i);
 });
 
 test("understand gates overview on a separate successful analyze Shell call", async () => {
@@ -146,7 +163,7 @@ test("understand gates overview on a separate successful analyze Shell call", as
   assert.ok(analyzeBlock.index < overviewBlock.index, "overview must follow analyze");
   const gate = understand.slice(analyzeBlock.index, overviewBlock.index + overviewBlock[0].length);
   assert.match(gate, /if and only if[^\n]+(?:analyze|call)[^\n]+(?:exit|status)[^\n]+0[^\n]+(?:second|separate)[^\n]+(?:call|overview)/i);
-  assert.match(understand, /if either[^\n]+fails?[^\n]+stop[^\n]+report[^\n]+(?:do not|never)[^\n]+(?:claim|report)[^\n]+(?:refreshed|success)/i);
+  assert.match(understand, /if (?:either|any)[^\n]+fails?[^\n]+stop[^\n]+report[^\n]+(?:do not|never)[^\n]+(?:claim|report)[^\n]+(?:refreshed|success)/i);
 });
 
 test("understand metadata covers post-index questions across turns", async () => {
@@ -178,7 +195,7 @@ test("understand rejects trailing slash-command content before calling Atlas", a
   const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
   const inspectIndex = understand.search(/first, inspect the slash invocation before running any Atlas command/i);
   const refusal = understand.match(/if `\/understand` contains any trailing content or argument,([\s\S]*?)(?=\n\notherwise,)/i);
-  const analyzeIndex = understand.search(/otherwise,[^\n]+only when[^\n]+no arguments[^\n]+run[^\n]+analyze/i);
+  const doctorIndex = understand.search(/otherwise,[^\n]+only when[^\n]+no arguments[^\n]+run[^\n]+doctor/i);
 
   assert.notEqual(inspectIndex, -1, "the invocation must be inspected before any tool call");
   assert.ok(refusal, "the Skill must define an early-stop branch for trailing content");
@@ -188,7 +205,7 @@ test("understand rejects trailing slash-command content before calling Atlas", a
   assert.match(refusal[0], /only tell the user to run `\/understand` by itself/i);
   assert.match(refusal[0], /next ordinary message/i);
   assert.ok(inspectIndex < refusal.index, "inspection must precede the refusal branch");
-  assert.ok(refusal.index < analyzeIndex, "the refusal branch must precede the no-argument analyze branch");
+  assert.ok(refusal.index < doctorIndex, "the refusal branch must precede the no-argument doctor branch");
 });
 
 test("understand routes later ordinary-language questions through fixed CLI commands", async () => {
@@ -431,7 +448,7 @@ test("user documentation describes the true Skill-only runtime and one-time lega
   }
 
   for (const guide of documents.slice(2)) {
-    assert.match(guide, /65 pass/);
+    assert.match(guide, /70 pass/);
     assert.match(guide, /0 skip/);
     assert.match(guide, /(?:不代表|does not claim|not evidence)/i);
   }
@@ -516,7 +533,7 @@ test("OpenCode guide defines the real Windows release gate", async () => {
   const releaseGate = markdownSection(docs, "真实 Windows 发布门禁");
 
   assert.match(releaseGate, /npm run test:installer:windows/);
-  assert.match(releaseGate, /65 pass/);
+  assert.match(releaseGate, /70 pass/);
   assert.match(releaseGate, /0 skip/);
   assert.match(releaseGate, /真实 Windows/);
   assert.match(releaseGate, /非 Windows[^\n]+skip/);

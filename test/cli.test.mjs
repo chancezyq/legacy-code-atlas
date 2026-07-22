@@ -39,6 +39,7 @@ async function mutateStandardIndex(project, mutate) {
 test("CLI help documents --query-file for every trace command", async () => {
   const help = await run(process.execPath, [cli, "--help"]);
 
+  assert.match(help.stdout, /doctor <project>/);
   assert.match(help.stdout, /prepare-query <project>/);
 
   for (const command of [
@@ -62,6 +63,84 @@ test("CLI help documents --query-file for every trace command", async () => {
   assert.match(help.stdout, /1024 characters/);
   assert.match(help.stdout, /64 tokens/);
   assert.match(help.stdout, /64 KiB/);
+});
+
+test("CLI doctor reports a clean runtime as JSON", async (t) => {
+  const project = await projectCopy(t);
+  const home = await mkdtemp(path.join(tmpdir(), "legacy-atlas-cli-doctor-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  const result = await run(process.execPath, [cli, "doctor", project, "--json"], {
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: path.join(home, "xdg"),
+      OPENCODE_CONFIG_DIR: "",
+    },
+  });
+  const report = JSON.parse(result.stdout);
+
+  assert.equal(report.ok, true);
+  assert.match(report.atlasVersion, /^\d+\.\d+\.\d+$/);
+  assert.equal(report.nodeVersion, process.versions.node);
+  assert.equal(report.projectRoot, path.resolve(project));
+  assert.equal(Array.isArray(report.roots), true);
+  assert.deepEqual(report.conflicts, []);
+
+  const text = await run(process.execPath, [cli, "doctor", project], {
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: path.join(home, "xdg"),
+      OPENCODE_CONFIG_DIR: "",
+    },
+  });
+  assert.equal(text.stdout.includes(path.join(home, ".opencode")), true);
+  assert.match(text.stdout, /Checked OpenCode roots:/);
+});
+
+test("CLI rejects --output without a value before doctor dispatch", async (t) => {
+  const project = await projectCopy(t);
+  await assertCliError(
+    ["doctor", project, "--output"],
+    /--output[^\r\n]+(?:缺少|路径)/,
+  );
+});
+
+test("CLI doctor reports a stale Bun-based Atlas tool with path and hash", async (t) => {
+  const project = await projectCopy(t);
+  const home = await mkdtemp(path.join(tmpdir(), "legacy-atlas-cli-doctor-conflict-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const staleTool = path.join(home, ".opencode", "tool", "legacy_atlas.ts");
+  await mkdir(path.dirname(staleTool), { recursive: true });
+  await writeFile(
+    staleTool,
+    'export function legacy_atlas_analyze() { return Bun.which("node"); }\n',
+    "utf8",
+  );
+
+  await assert.rejects(
+    run(process.execPath, [cli, "doctor", project, "--json"], {
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: path.join(home, "xdg"),
+        OPENCODE_CONFIG_DIR: "",
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 4);
+      const report = JSON.parse(error.stdout);
+      assert.equal(report.ok, false);
+      assert.deepEqual(report.conflicts.map((entry) => entry.path), [staleTool]);
+      assert.match(report.conflicts[0].sha256, /^[a-f0-9]{64}$/);
+      assert.match(report.conflicts[0].classification, /legacy-atlas-tool/);
+      return true;
+    },
+  );
 });
 
 test("prepare-query atomically replaces unsafe query-file links without touching their targets", async (t) => {
@@ -104,6 +183,24 @@ test("CLI analyzes a project and writes the default deterministic index", async 
   assert.match(first.stdout, /index\.json/);
   assert.match(second.stdout, /分析完成/);
   assert.equal(firstIndex, secondIndex);
+});
+
+test("CLI analyzes source-derived reserved JSP fields and path-like iBATIS identifiers", async (t) => {
+  const project = await projectCopy(t);
+  await writeFile(
+    path.join(project, "web", "order", "worker-fields.jsp"),
+    '<form action="/save"><input name="duration" value="30"><input name="worker" value="legacy"><input name="node" value="primary"></form>',
+    "utf8",
+  );
+  await writeFile(
+    path.join(project, "sqlmap", "path-like-id.xml"),
+    '<sqlMap><procedure id="/home/job">select 1</procedure></sqlMap>',
+    "utf8",
+  );
+
+  const analyzed = await run(process.execPath, [cli, "analyze", project]);
+  assert.equal(analyzed.stderr, "");
+  await stat(path.join(project, ".legacy-code-atlas", "index.json"));
 });
 
 test("CLI auto-analyzes a fresh project when overview has no index", async (t) => {
@@ -382,6 +479,7 @@ test("CLI bounds logical query length and token count before loading the index",
   const project = await projectCopy(t);
   const atlasDirectory = path.join(project, ".legacy-code-atlas");
   const queryPath = path.join(atlasDirectory, "query.txt");
+  await mkdir(atlasDirectory, { recursive: true });
   await rm(path.join(atlasDirectory, "cache.json"), { force: true });
   await writeFile(path.join(atlasDirectory, "index.json"), "not-json", "utf8");
 

@@ -123,7 +123,9 @@ test("Windows installer targets the Agent Skill and only recognizes old OpenCode
   assert.match(installer, /\[switch\]\$Uninstall/);
   assert.match(installer, /\.legacy-code-atlas/);
   assert.match(installer, /OPENCODE_CONFIG_DIR/);
+  assert.match(installer, /XDG_CONFIG_HOME/);
   assert.match(installer, /\.config[\\/]opencode/);
+  assert.match(installer, /\.opencode/);
   assert.match(installer, /\$SkillDir\s*=\s*Join-Path\s+\$HOME\s+["']\.agents\\skills\\understand["']/);
   assert.match(installer, /\$SkillTarget\s*=\s*Join-Path\s+\$SkillDir\s+["']SKILL\.md["']/);
   assert.match(installer, /tools[\\/]legacy_atlas\.ts/);
@@ -152,6 +154,10 @@ test("OpenCode integration source is a true Skill-only runtime without a TypeScr
     (error) => error?.code === "ENOENT",
   );
 
+  assert.match(
+    skill,
+    /node\s+[`\"]?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas[.]mjs[`\"]?\s+doctor\s+[`\"]?\$PWD[`\"]?/i,
+  );
   assert.match(
     skill,
     /node\s+[`\"]?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas[.]mjs[`\"]?\s+analyze\s+[`\"]?\$PWD[`\"]?/i,
@@ -187,6 +193,7 @@ test("installer validates Skill-only sources and published artifacts before comm
   }
   assert.match(skillValidation, /[.]legacy-code-atlas[\\/]query[.]txt/);
   assert.match(skillValidation, /prepare-query/);
+  assert.match(skillValidation, /doctor/);
   assert.match(skillValidation, /analyze/);
   assert.match(skillValidation, /overview/);
   assert.match(publishedValidation, /Get-ContentHash\s+\$SkillTarget/);
@@ -213,7 +220,23 @@ test("installer blocks but never deletes unowned stale or duplicate OpenCode fil
   assert.match(preflight, /Assert-NoUnownedLegacyIntegrationFiles/);
   assert.match(preflight, /已被修改/);
   assert.match(collisionGuard, /OPENCODE_CONFIG_DIR/);
+  assert.match(collisionGuard, /XDG_CONFIG_HOME/);
+  assert.match(collisionGuard, /\.config[\\/]opencode/);
+  assert.match(collisionGuard, /\.opencode/);
+  assert.match(collisionGuard, /Join-Path\s+\$configDir\s+["']tool["']/);
+  assert.match(collisionGuard, /Join-Path\s+\$configDir\s+["']tools["']/);
+  assert.match(collisionGuard, /Get-ChildItem[^\r\n]+-LiteralPath[^\r\n]+-Force/);
+  assert.match(collisionGuard, /GetExtension/);
+  assert.match(collisionGuard, /["'][.]js["']/);
+  assert.match(collisionGuard, /["'][.]ts["']/);
+  for (const hash of [
+    "410C82A1CBC65A4FEF185F8F2B6DA506AB328997C505569E4A88A3667A9290FF",
+    "17A88674FD7F9822B2D7DBF0320AF8BBB3F6A7ABDB7EF725AB6066A505310E57",
+    "5A7985A2DE64F6BC072C7890D2A3964D6645A3ED694C804F5896F615D8510235",
+    "1D683E03F06B0C1CDD80671174C5BC467BD4B871736DE2728BE3E530FB87D4CC",
+  ]) assert.match(collisionGuard, new RegExp(hash));
   assert.match(collisionGuard, /Get-PathEntryWithoutFollowingTarget/);
+  assert.match(collisionGuard, /Get-ContentHash/);
   assert.match(collisionGuard, /Bun is not defined/);
   assert.match(collisionGuard, /保留文件并停止|保留文件/);
   assert.doesNotMatch(collisionGuard, /Remove-Item/);

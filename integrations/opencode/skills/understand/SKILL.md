@@ -17,23 +17,31 @@ The fixed command strings require a Shell mode with PowerShell-compatible or POS
 
 For the first full scan, configure the analyze Shell call through tool-call metadata, not the command string, to request the maximum supported timeout. If that foreground timeout is insufficient and the host exposes background execution through supported tool metadata, use it and wait for the analyze call to exit before running overview. Never rely on a short default timeout, and never invent unsupported metadata fields. If neither a sufficient timeout nor background execution with waiting is available, stop and report the host limitation without changing the fixed command.
 
-Otherwise, only when the user invokes `/understand` with no arguments, run this fixed analyze command as one Shell call:
+Otherwise, only when the user invokes `/understand` with no arguments, run this fixed doctor command as one Shell call:
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"
+```
+
+The doctor is read-only and does not modify, move, or delete any OpenCode tool or config file. It checks the installed Atlas and Node versions, verifies worker availability, and inspects the official OpenCode user and current-project tool locations for an older Atlas custom tool. If it reports a conflict, preserve the exact path and SHA-256 in the answer. Never delete an entire `tool`, `tools`, or OpenCode config directory.
+
+If and only if the doctor call exits with status `0`, run this fixed analyze command as a second separate Shell call:
 
 ```sh
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"
 ```
 
-If and only if that analyze call exits with status `0`, make a second separate Shell call for overview:
+If and only if that analyze call exits with status `0`, make a third separate Shell call for overview:
 
 ```sh
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"
 ```
 
-If either call fails, stop immediately, report its exact error, and do not claim the index was refreshed successfully.
+If any doctor, analyze, or overview call fails, stop immediately, report its exact error, and do not claim the index was refreshed successfully.
 
 Use only fixed commands from this Skill, and use those commands exactly. Do not add user text, flags, URLs, paths, or shell substitutions. If the runtime is missing, report the install path and ask the user to rerun the Windows installer; do not substitute another runtime, a network command, or a project-local executable.
 
-When both commands succeed, summarize the index status and overview. Tell the user to ask the desired question in the next ordinary message. Do not append a query to `/understand` or advertise a parameterized form of that command.
+When all three commands succeed, summarize the compatibility check, index status, and overview. Tell the user to ask the desired question in the next ordinary message. Do not append a query to `/understand` or advertise a parameterized form of that command.
 
 ## Cross-turn and context recovery
 

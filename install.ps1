@@ -205,6 +205,7 @@ function Get-Utf8Text([string]$Path) {
 function Assert-SkillCliProtocolContent([string]$Path) {
     $content = Get-Utf8Text $Path
     $requiredFragments = @(
+        'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"',
@@ -1253,11 +1254,31 @@ function Assert-NoUnownedLegacyIntegrationFiles {
         [psobject]$ExistingManifest
     )
 
+    $userProfile = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace([string]$userProfile)) {
+        $userProfile = $HOME
+    }
+
+    $globalConfigDir = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$env:XDG_CONFIG_HOME)) {
+        $globalConfigDir = Join-Path $env:XDG_CONFIG_HOME "opencode"
+    } else {
+        $globalConfigDir = Join-Path $userProfile ".config\opencode"
+    }
+
     $candidateConfigDirs = @(
         $Transaction.ConfigDir,
         $env:OPENCODE_CONFIG_DIR,
-        (Join-Path $HOME ".config\opencode")
+        $globalConfigDir,
+        (Join-Path $userProfile ".opencode")
     )
+    $releasedToolHashes = @(
+        "410C82A1CBC65A4FEF185F8F2B6DA506AB328997C505569E4A88A3667A9290FF",
+        "17A88674FD7F9822B2D7DBF0320AF8BBB3F6A7ABDB7EF725AB6066A505310E57",
+        "5A7985A2DE64F6BC072C7890D2A3964D6645A3ED694C804F5896F615D8510235",
+        "1D683E03F06B0C1CDD80671174C5BC467BD4B871736DE2728BE3E530FB87D4CC"
+    )
+    $releasedToolSizes = @(3888L, 4003L, 4012L, 4142L)
     $seenConfigDirs = @{}
     foreach ($candidateConfigDir in $candidateConfigDirs) {
         if ([string]::IsNullOrWhiteSpace([string]$candidateConfigDir)) { continue }
@@ -1266,25 +1287,52 @@ function Assert-NoUnownedLegacyIntegrationFiles {
         if ($seenConfigDirs.ContainsKey($configKey)) { continue }
         $seenConfigDirs[$configKey] = $true
 
-        foreach ($candidate in @(
-            [pscustomobject]@{
-                Kind = "opencode-tool"
-                Path = Get-CanonicalPath (Join-Path $configDir "tools\legacy_atlas.ts")
-            },
-            [pscustomobject]@{
-                Kind = "legacy-command"
-                Path = Get-CanonicalPath (Join-Path $configDir "commands\understand.md")
+        $legacyCommand = Get-CanonicalPath (Join-Path $configDir "commands\understand.md")
+        Assert-NoReparsePointInPath -Boundary $configDir -Path $legacyCommand
+        if ($null -ne (Get-PathEntryWithoutFollowingTarget $legacyCommand) -and
+            -not (Test-ManifestOwnsExternalPath -Manifest $ExistingManifest -Kind "legacy-command" -Path $legacyCommand)) {
+            throw "检测到不属于当前 manifest 的旧 commands\understand.md：$legacyCommand。安装器已保留文件并停止；请先按原插件流程备份并卸载或禁用。"
+        }
+
+        $toolDirectories = @(
+            (Get-CanonicalPath (Join-Path $configDir "tool")),
+            (Get-CanonicalPath (Join-Path $configDir "tools"))
+        )
+        foreach ($toolDirectory in $toolDirectories) {
+            Assert-NoReparsePointInPath -Boundary $configDir -Path $toolDirectory
+            $toolDirectoryEntry = Get-PathEntryWithoutFollowingTarget $toolDirectory
+            if ($null -eq $toolDirectoryEntry) { continue }
+            if (-not $toolDirectoryEntry.PSIsContainer) {
+                throw "OpenCode custom-tool 路径不是目录，无法安全扫描：$toolDirectory。安装器已保留现场并停止。"
             }
-        )) {
-            Assert-NoReparsePointInPath -Boundary $configDir -Path $candidate.Path
-            if ($null -eq (Get-PathEntryWithoutFollowingTarget $candidate.Path)) { continue }
-            if (Test-ManifestOwnsExternalPath -Manifest $ExistingManifest -Kind $candidate.Kind -Path $candidate.Path) {
-                continue
+
+            foreach ($toolEntry in @(Get-ChildItem -LiteralPath $toolDirectory -Force -ErrorAction Stop)) {
+                $extension = [IO.Path]::GetExtension($toolEntry.Name)
+                if (-not [StringComparer]::OrdinalIgnoreCase.Equals($extension, ".js") -and
+                    -not [StringComparer]::OrdinalIgnoreCase.Equals($extension, ".ts")) {
+                    continue
+                }
+
+                $toolPath = Get-CanonicalPath $toolEntry.FullName
+                Assert-NoReparsePointInPath -Boundary $configDir -Path $toolPath
+                if ($toolEntry.PSIsContainer) {
+                    throw "OpenCode custom-tool 候选不是普通文件，无法安全扫描：$toolPath。安装器已保留现场并停止。"
+                }
+                if (Test-ManifestOwnsExternalPath -Manifest $ExistingManifest -Kind "opencode-tool" -Path $toolPath) {
+                    continue
+                }
+
+                $baseName = [IO.Path]::GetFileNameWithoutExtension($toolEntry.Name)
+                $hasLegacyName = [StringComparer]::OrdinalIgnoreCase.Equals($baseName, "legacy_atlas")
+                $matchesReleasedSize = $releasedToolSizes -contains [int64]$toolEntry.Length
+                if (-not $hasLegacyName -and -not $matchesReleasedSize) { continue }
+
+                $toolHash = (Get-ContentHash $toolPath).ToUpperInvariant()
+                $hasReleasedHash = $releasedToolHashes -contains $toolHash
+                if (-not $hasLegacyName -and -not $hasReleasedHash) { continue }
+
+                throw "检测到不属于当前 manifest 的旧 OpenCode custom tool：$toolPath（SHA-256: $toolHash）。文件名或已发布哈希表明它可能再次触发 Bun is not defined；安装器已保留文件并停止。请先备份、确认来源后移动这个单独文件，不要删除整个 tool 或 tools 目录。"
             }
-            if ($candidate.Kind -ceq "opencode-tool") {
-                throw "检测到不属于当前 manifest 的 legacy_atlas.ts：$($candidate.Path)。为避免 OpenCode custom-tool loader 再次触发 Bun is not defined，安装器已保留文件并停止；请先备份、确认来源后再处理，不要删除整个 tools 目录。"
-            }
-            throw "检测到不属于当前 manifest 的旧 commands\understand.md：$($candidate.Path)。安装器已保留文件并停止；请先按原插件流程备份并卸载或禁用。"
         }
     }
 }
@@ -1522,6 +1570,8 @@ if ($existingManifest) {
     $OpenCodeConfigDir = Get-CanonicalPath $existingManifest.ConfigDir
 } elseif ($env:OPENCODE_CONFIG_DIR) {
     $OpenCodeConfigDir = Get-CanonicalPath $env:OPENCODE_CONFIG_DIR
+} elseif ($env:XDG_CONFIG_HOME) {
+    $OpenCodeConfigDir = Get-CanonicalPath (Join-Path $env:XDG_CONFIG_HOME "opencode")
 } else {
     $OpenCodeConfigDir = Get-CanonicalPath (Join-Path $HOME ".config\opencode")
 }

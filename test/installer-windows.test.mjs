@@ -28,6 +28,10 @@ const sourceCliPath = fileURLToPath(new URL(
   import.meta.url,
 ));
 const sourcePackagePath = fileURLToPath(new URL("../package.json", import.meta.url));
+const releasedBunToolFixturePath = fileURLToPath(new URL(
+  "./fixtures/opencode/released-legacy-atlas-bun-lf.fixture",
+  import.meta.url,
+));
 const sourceRoot = fileURLToPath(new URL("../", import.meta.url));
 const windowsOnly = process.platform === "win32"
   ? false
@@ -61,10 +65,10 @@ async function snapshotInstallerState(sandbox) {
   );
 }
 
-async function assertInstallerRejectsWithUnchangedState({ sandbox, args = [], message }) {
+async function assertInstallerRejectsWithUnchangedState({ sandbox, args = [], env = {}, message }) {
   const before = await snapshotInstallerState(sandbox);
   await assert.rejects(
-    runInstaller({ installerPath, sandbox, args }),
+    runInstaller({ installerPath, sandbox, args, env }),
     (error) => {
       assert.equal(error.powerShellMajorVersion, 5);
       assert.equal(error.powerShellMinorVersion, 1);
@@ -685,6 +689,71 @@ test("Windows fresh install preserves and rejects an unowned legacy tool", { ski
   });
   assert.equal(await readFile(legacyTool, "utf8"), content);
 });
+
+test("Windows fresh install rejects a renamed released Bun tool by hash", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const renamedTool = path.join(sandbox.configDir, "tools", "renamed-company.js");
+  const content = await readFile(releasedBunToolFixturePath);
+  assert.equal(content.length, 3888);
+  assert.equal(
+    await sha256(releasedBunToolFixturePath),
+    "410C82A1CBC65A4FEF185F8F2B6DA506AB328997C505569E4A88A3667A9290FF",
+  );
+  await mkdir(path.dirname(renamedTool), { recursive: true });
+  await writeFile(renamedTool, content);
+
+  await assertInstallerRejectsWithUnchangedState({
+    sandbox,
+    message: /renamed-company[.]js[\s\S]*410C82A1CBC65A4FEF185F8F2B6DA506AB328997C505569E4A88A3667A9290FF[\s\S]*保留/i,
+  });
+  assert.deepEqual(await readFile(renamedTool), content);
+});
+
+test("Windows fresh install ignores and preserves an unrelated same-size company tool", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const companyTool = path.join(sandbox.configDir, "tools", "company.js");
+  const prefix = "export const company = true;\n";
+  const content = Buffer.from(prefix + " ".repeat(3888 - Buffer.byteLength(prefix)), "utf8");
+  assert.equal(content.length, 3888);
+  await mkdir(path.dirname(companyTool), { recursive: true });
+  await writeFile(companyTool, content);
+
+  await runInstaller({ installerPath, sandbox });
+
+  assert.deepEqual(await readFile(companyTool), content);
+  assert.equal(
+    await pathExists(path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md")),
+    true,
+  );
+  await assertNoTransactionArtifacts(sandbox);
+});
+
+for (const candidate of [
+  { name: "singular user root JS", root: "user", directory: "tool", extension: ".js" },
+  { name: "plural XDG root TS", root: "xdg", directory: "tools", extension: ".ts" },
+  { name: "singular default root TS", root: "default", directory: "tool", extension: ".ts" },
+]) {
+  test(`Windows fresh install preserves and rejects an unowned ${candidate.name} legacy tool`, { skip: windowsOnly }, async (t) => {
+    const sandbox = await createWindowsInstallerSandbox(t);
+    const xdgHome = path.join(sandbox.root, "xdg-home");
+    const configRoot = candidate.root === "user"
+      ? path.join(sandbox.homeDir, ".opencode")
+      : candidate.root === "xdg"
+        ? path.join(xdgHome, "opencode")
+        : path.join(sandbox.homeDir, ".config", "opencode");
+    const legacyTool = path.join(configRoot, candidate.directory, `legacy_atlas${candidate.extension}`);
+    const content = `export const companyTool = "${candidate.name}";\n`;
+    await mkdir(path.dirname(legacyTool), { recursive: true });
+    await writeFile(legacyTool, content, "utf8");
+
+    await assertInstallerRejectsWithUnchangedState({
+      sandbox,
+      env: candidate.root === "xdg" ? { XDG_CONFIG_HOME: xdgHome } : {},
+      message: /legacy_atlas[.](?:js|ts)[\s\S]*保留[\s\S]*(?:停止|备份|确认来源)/i,
+    });
+    assert.equal(await readFile(legacyTool, "utf8"), content);
+  });
+}
 
 test("Windows v1 migration rejects an existing Understand-Anything Skill without changing state", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
