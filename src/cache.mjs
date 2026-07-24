@@ -36,6 +36,39 @@ function cloneJson(value) {
   }
 }
 
+// A value passes only when serializing it directly is observably identical to
+// serializing its cloneJson copy: plain data, no accessors, no toJSON hooks,
+// no symbol keys, no cycles. Anything doubtful falls back to cloneJson.
+function safeForDirectSerialization(value, ancestors) {
+  if (value === null) return true;
+  const type = typeof value;
+  if (type === "string" || type === "boolean" || type === "number") return true;
+  if (type !== "object") return false;
+  const isArray = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype) return false;
+  if (ancestors.has(value)) return false;
+  if (Object.getOwnPropertySymbols(value).length > 0) return false;
+  ancestors.add(value);
+  try {
+    for (const key of Object.getOwnPropertyNames(value)) {
+      if (isArray && key === "length") continue;
+      if (key === "toJSON") return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) return false;
+      if (!safeForDirectSerialization(descriptor.value, ancestors)) return false;
+    }
+  } finally {
+    ancestors.delete(value);
+  }
+  return true;
+}
+
+function reusableRecordCopy(record) {
+  if (safeForDirectSerialization(record, new Set())) return record;
+  return cloneJson(record);
+}
+
 function validEntry(relativePath, entry) {
   return isCanonicalRelativePath(relativePath)
     && isPlainObject(entry)
@@ -58,7 +91,7 @@ function normalizedEntries(value) {
     .sort(([left], [right]) => left.localeCompare(right, "en"));
   for (const [relativePath, entry] of candidates) {
     if (!validEntry(relativePath, entry)) continue;
-    const record = cloneJson(entry.record);
+    const record = reusableRecordCopy(entry.record);
     if (record === null) continue;
     entries.set(relativePath, {
       fingerprint: entry.fingerprint,

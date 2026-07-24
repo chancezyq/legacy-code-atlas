@@ -86,10 +86,11 @@ function parseArguments(argv) {
 async function writeIndex(graph, outputPath) {
   validateGraphIndex(graph);
   const serialized = serializeGraph(graph);
-  if (Buffer.byteLength(serialized) > MAX_GRAPH_INDEX_BYTES) {
+  const bytes = Buffer.from(serialized);
+  if (bytes.length > MAX_GRAPH_INDEX_BYTES) {
     throw new Error("项目索引不能超过 512 MiB");
   }
-  await writeFileAtomic(outputPath, serialized);
+  await writeFileAtomic(outputPath, bytes);
   return serialized;
 }
 
