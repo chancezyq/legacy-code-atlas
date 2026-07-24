@@ -208,6 +208,7 @@ function Assert-SkillCliProtocolContent([string]$Path) {
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD" --main-thread',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"',
+        'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" trace-url "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" trace-statement "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',

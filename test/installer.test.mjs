@@ -199,6 +199,10 @@ test("installer validates Skill-only sources and published artifacts before comm
     "installer must require the OpenCode main-thread compatibility command",
   );
   assert.match(skillValidation, /overview/);
+  assert.ok(
+    skillValidation.includes('node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"'),
+    "installer must require the fixed docs generation command",
+  );
   assert.match(publishedValidation, /Get-ContentHash\s+\$SkillTarget/);
   assert.match(publishedValidation, /SkillSha256/);
   assert.match(publishedValidation, /Assert-.*Skill/);

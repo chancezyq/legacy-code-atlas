@@ -13,6 +13,8 @@ import {
   validateGraphIndex,
 } from "../src/index-validation.mjs";
 import { searchGraph, traceFeature, traceProcedure, traceStatement, traceTable, traceUrl } from "../src/query.mjs";
+import { buildDocumentModel } from "../src/doc-model.mjs";
+import { renderDiagrams, renderUiSpec, renderUseCases } from "../src/doc-render.mjs";
 import { renderInlineText, renderTraceMarkdown } from "../src/render.mjs";
 import { inspectOpenCodeCompatibility, renderOpenCodeDoctor } from "../src/opencode-doctor.mjs";
 import { replaceUnsafeTextControls } from "../src/text-safety.mjs";
@@ -22,6 +24,7 @@ const HELP = `Legacy Code Atlas
 Usage:
   legacy-code-atlas doctor <project> [--json]
   legacy-code-atlas analyze <project> [--output <index.json>] [--main-thread] [--json]
+  legacy-code-atlas docs <project> [--json]
   legacy-code-atlas prepare-query <project>
   legacy-code-atlas overview <project-or-index> [--json]
   legacy-code-atlas search <project-or-index> <term> [--json]
@@ -442,6 +445,37 @@ async function main() {
     const serialized = await writeIndex(graph, outputPath);
     if (json) process.stdout.write(serialized);
     else process.stdout.write(`分析完成：${graph.summary.nodes} 个节点，${graph.summary.edges} 条关系\n索引：${outputPath}\n`);
+    return;
+  }
+
+  if (command === "docs") {
+    if (queryParts.length > 0 || output) throw new Error("docs 不接受额外参数");
+    const project = path.resolve(input);
+    const projectMetadata = await stat(project);
+    if (!projectMetadata.isDirectory()) throw new Error("docs 需要项目目录");
+    const graph = await loadGraph(project);
+    const model = buildDocumentModel(graph);
+    const docsDir = path.join(project, ATLAS_DIRECTORY_NAME, "docs");
+    const documents = [
+      ["use-cases.md", renderUseCases(model)],
+      ["ui-spec.md", renderUiSpec(model)],
+      ["diagrams.md", renderDiagrams(model)],
+    ];
+    const files = [];
+    for (const [fileName, content] of documents) {
+      const target = path.join(docsDir, fileName);
+      await writeFileAtomic(target, content);
+      files.push(path.join(ATLAS_DIRECTORY_NAME, "docs", fileName).replaceAll("\\", "/"));
+    }
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ files, stats: model.stats, truncated: model.truncated }, null, 2)}\n`);
+    } else {
+      process.stdout.write([
+        `文档生成完成：${model.stats.useCases} 个用例，${model.stats.pages} 个页面，${model.stats.modules} 个模块`,
+        ...files.map((file) => `- ${file}`),
+        "",
+      ].join("\n"));
+    }
     return;
   }
 

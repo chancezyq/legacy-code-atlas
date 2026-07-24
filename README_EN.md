@@ -103,6 +103,24 @@ Results include source file paths and line numbers. Relationships directly suppo
 
 Combinatorial path traversal expands at most `5,000` states and returns at most `100` paths per direction for each candidate. A trace that follows both upstream and downstream applies each cap independently to each direction. Reaching either cap returns partial results with an accurate truncation warning. These caps bound path expansion only; initial candidate search still scans index nodes, while adjacency construction and sorting still scale with the relevant edge count.
 
+## Generating shareable documents (UCS / UIS / diagrams)
+
+After the index exists, ask OpenCode for use case documents, UI documents, diagrams, or shareable documents. The Skill runs one fixed command:
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"
+```
+
+It deterministically generates three Markdown documents inside the project:
+
+```text
+.legacy-code-atlas/docs/use-cases.md   Use case specifications (UCS): grouped by module, with entry points, main flows, table access, and file:line citations
+.legacy-code-atlas/docs/ui-spec.md     UI specifications (UIS): visible text, form fields, page actions, and arrival paths for each JSP page
+.legacy-code-atlas/docs/diagrams.md    Diagrams: Mermaid module overview flowcharts and use-case sequence diagrams; GitHub/GitLab render them natively
+```
+
+Every statement is derived from index facts with project-relative citations and no model rewriting. A main flow whose minimum confidence is below `0.95` is marked as containing heuristic relationships that need manual review. Output sizes are hard-capped (1 MiB per file, 200 use cases/pages, 30 flowcharts, 20 sequence diagrams) with explicit truncation notices. The documents contain source structure, paths, and SQL — treat them as company-sensitive data like the index and share them only through approved channels.
+
 ## Installation locations
 
 The default installation is under the current Windows user profile:

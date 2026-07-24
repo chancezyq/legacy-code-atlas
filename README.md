@@ -108,6 +108,24 @@ URL、statement ID、表名和 procedure 名会保留准确的源码标识符，
 
 每个候选的组合路径遍历按方向最多展开 `5,000` 个 state，并最多返回 `100` 条路径；需要同时向上游和下游追踪时，每个方向分别计算。达到任一上限会返回带准确截断 warning 的部分结果。这些上限只约束组合路径展开；初始候选搜索仍扫描 index 节点，邻接表构建和排序仍随相关边数量增长。
 
+## 生成分享文档（UCS / UIS / 系统图）
+
+索引生成后，可以直接向 OpenCode 提出“生成用例文档 / 界面文档 / 系统图 / 分享文档”，Skill 会运行一条固定命令：
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"
+```
+
+它在项目内确定性地生成三份 Markdown 文档：
+
+```text
+.legacy-code-atlas/docs/use-cases.md   用例规格（UCS）：按模块分组，含入口、主流程、读写表和 file:line 引用
+.legacy-code-atlas/docs/ui-spec.md     界面规格（UIS）：每个 JSP 页面的可见文本、表单字段、页面动作和到达方式
+.legacy-code-atlas/docs/diagrams.md    系统图：Mermaid 模块总览 flowchart 和用例时序图，GitHub/GitLab 可直接渲染
+```
+
+所有内容都从索引事实推导并附项目相对引用，不经过模型改写；主流程置信度低于 `0.95` 时会标注“含启发式关系，需人工复核”。文档规模有硬上限（每份 1 MiB、用例/页面各 200 个、图各 30/20 个），超出会显式标注截断。这些文档包含源码结构、路径和 SQL，请与索引一样按公司敏感数据管理，只通过公司批准的渠道分享。
+
 ## 安装位置
 
 默认安装到当前 Windows 用户目录：

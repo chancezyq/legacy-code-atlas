@@ -340,6 +340,26 @@ test("atlas permits cited-source verification but no shell or edits", async () =
   assert.match(atlasSkill, /never[^\n]+`read`[^\n]+(?:absolute|UNC|parent|\.\.)/i);
 });
 
+test("atlas generates shareable documents through one fixed docs command", async () => {
+  const atlasSkill = await readFile(new URL("../integrations/opencode/skills/atlas/SKILL.md", import.meta.url), "utf8");
+  const shellBlocks = [...atlasSkill.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)];
+  const docs = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"';
+  const docsBlock = shellBlocks.find((match) => match[1].trim() === docs);
+
+  assert.ok(docsBlock, "docs must be one fixed Shell call");
+  const section = markdownSection(atlasSkill, "Shareable documents");
+  assert.match(section, /use case|use-case/i);
+  assert.match(section, /UI spec|ui-spec/i);
+  assert.match(section, /diagram/i);
+  assert.match(section, /metadata-only[^\n]+(?:existence|exists)/i);
+  assert.match(section, /if[^\n]+index[^\n]+missing[^\n]+`\/atlas`[^\n]+by itself/i);
+  assert.match(section, /\.legacy-code-atlas[\\/]docs[\\/]use-cases\.md/);
+  assert.match(section, /\.legacy-code-atlas[\\/]docs[\\/]ui-spec\.md/);
+  assert.match(section, /\.legacy-code-atlas[\\/]docs[\\/]diagrams\.md/);
+  assert.match(section, /(?:do not|never)[^\n]+(?:add|append)[^\n]+(?:flag|user text)/i);
+  assert.match(section, /sensitive/i);
+});
+
 test("the legacy understand Markdown command is removed", async () => {
   await assert.rejects(
     readFile(new URL("../integrations/opencode/commands/understand.md", import.meta.url), "utf8"),

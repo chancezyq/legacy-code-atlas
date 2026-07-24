@@ -155,6 +155,10 @@ function traverse(graph, startIds, options = {}) {
   };
 }
 
+export function traverseGraph(graph, startIds, options = {}) {
+  return traverse(graph, startIds, options);
+}
+
 function mergeTraversals(...traversals) {
   const nodes = new Map();
   const edges = new Map();
