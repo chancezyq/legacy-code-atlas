@@ -4,7 +4,7 @@ This project uses Legacy Code Atlas for evidence-backed code navigation. Atlas r
 
 Before answering a business-feature question:
 
-1. Check `.legacy-code-atlas/index.json` with a metadata-only existence operation. This check is existence-only; do not assess index freshness. If the index is missing, tell the user to run `/understand` by itself; never run `analyze` automatically or run a trace command without the index.
+1. Check `.legacy-code-atlas/index.json` with a metadata-only existence operation. This check is existence-only; do not assess index freshness. If the index is missing, tell the user to run `/atlas` by itself; never run `analyze` automatically or run a trace command without the index.
 2. For an explicit URL, statement ID, procedure, or table, preserve the exact source identifier. For a natural-language feature question, derive one concise source-language candidate and translate the question's business terms into that source language.
 3. Before every structured query write, run the fixed command `node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"`; stop if it fails.
 4. Use the host's structured `write` tool with the project-relative path `.legacy-code-atlas/query.txt` to write the selected candidate or explicit identifier.

@@ -12,7 +12,7 @@ The first full scan must request the maximum supported timeout. If the foregroun
 
 ## Windows installation
 
-Understand-Anything normally installs `%USERPROFILE%\.agents\skills\understand\SKILL.md` too. That path can expose only one `/understand` Skill, and the Atlas installer refuses to overwrite an existing directory it does not own. If it is still present, back it up and release the namespace through Understand-Anything's own uninstall or disable procedure before running the Atlas installer. Do not manually delete a Skill directory of unknown origin.
+The Atlas Agent Skill now installs at `%USERPROFILE%\.agents\skills\atlas\SKILL.md` with the `/atlas` entry point. It does not occupy Understand-Anything's `%USERPROFILE%\.agents\skills\understand\SKILL.md` (`/understand` entry), so the two Skills can coexist. An older Atlas version used `skills\understand`; if it is still present, uninstall it first by running `install.ps1 -Uninstall` from that older source download, then install this version. The Atlas installer refuses to overwrite an existing directory it does not own; do not manually delete a Skill directory of unknown origin.
 
 Windows PowerShell 5.1 and Node.js 20 or later are required. Download and extract the source, open Windows PowerShell in the `legacy-code-atlas` directory, and run:
 
@@ -26,7 +26,7 @@ The installer does not require administrator privileges, access the network, or 
 The first message must be the command below with no argument or appended question:
 
 ```text
-/understand
+/atlas
 ```
 
 The Skill runs these fixed commands as three separate Shell calls. `doctor` is a read-only OpenCode compatibility preflight. It runs `analyze` only after `doctor` exits with status `0`, then runs `overview` only after `analyze` succeeds. Any failure stops the workflow instead of reporting a stale index as refreshed. The commands do not add user-provided text, paths, or extra flags:
@@ -47,7 +47,7 @@ Where is the refund approval feature implemented?
 
 The Agent Skill handles an ordinary message through this data flow:
 
-1. The Skill first uses a metadata-only existence check for `.legacy-code-atlas/index.json` without reading its contents. If it is missing, the Skill asks the user to run `/understand` by itself and stops.
+1. The Skill first uses a metadata-only existence check for `.legacy-code-atlas/index.json` without reading its contents. If it is missing, the Skill asks the user to run `/atlas` by itself and stops.
 2. For an explicit URL, statement ID, table, or procedure, the Skill preserves the exact source identifier. For a natural-language feature question, the company's model derives one concise source-language search candidate and translates the question's business terms into the project's source language.
 3. Before every structured write, the Skill runs the fixed preflight `node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"` and stops if it fails.
 4. OpenCode's structured `write` operation writes the selected source-language candidate or exact identifier to `.legacy-code-atlas/query.txt` in the current project.
@@ -68,7 +68,7 @@ These defenses cover symlink, junction, or hardlink entries that already exist w
 
 Combinatorial path traversal expands at most `5,000` states and returns at most `100` paths per direction for each query candidate. A trace that follows both upstream and downstream applies each cap independently to each direction. Reaching either cap emits an accurate truncation warning and returns partial results. These caps limit path expansion only; initial search still scans index nodes, and adjacency construction and sorting still scale with the relevant edge count.
 
-After source changes, send `/understand` again as a message on its own and wait before sending the next normal question.
+After source changes, send `/atlas` again as a message on its own and wait before sending the next normal question.
 
 ## Files written by the installer
 
@@ -76,7 +76,7 @@ The installer copies only the dependency-free runtime and global Agent Skill to:
 
 ```text
 %USERPROFILE%\.legacy-code-atlas\
-%USERPROFILE%\.agents\skills\understand\SKILL.md
+%USERPROFILE%\.agents\skills\atlas\SKILL.md
 ```
 
 The Agent Skill is the only runtime entry point. The current source no longer ships `integrations\opencode\tools\legacy_atlas.ts`; the installer does not write `tools\legacy_atlas.ts` or create an OpenCode `tools` directory during a fresh install or manifest-v3 update.
@@ -87,7 +87,7 @@ The selected OpenCode configuration directory is still stored as `configDir` in:
 %USERPROFILE%\.legacy-code-atlas\.legacy-code-atlas-owner.json
 ```
 
-In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does not mean that Atlas owns the directory or any tool inside it. The Agent Skill always remains at `%USERPROFILE%\.agents\skills\understand\SKILL.md`.
+In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does not mean that Atlas owns the directory or any tool inside it. The Agent Skill always remains at `%USERPROFILE%\.agents\skills\atlas\SKILL.md`.
 
 The former Markdown command at `commands\understand.md` has been removed. A v1/v2 upgrade to v3 retires a `legacy_atlas.ts` only when its exact path and SHA-256 are proven by the old manifest; it never writes a placeholder tool. A missing owned tool does not block migration. A modified owned tool, or an unowned/duplicate tool, is preserved and blocks installation until its origin is verified. The v1 owned command follows the same hash-protected rule. Neither legacy file is a current entry point.
 
@@ -131,7 +131,7 @@ node --version
 node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") --help
 ```
 
-Node.js must be version 20 or later. If the runtime works but `/understand` is missing, fully exit every OpenCode process and confirm that OpenCode and the installer use the same Windows account.
+Node.js must be version 20 or later. If the runtime works but `/atlas` is missing, fully exit every OpenCode process and confirm that OpenCode and the installer use the same Windows account.
 
 ## Compatibility doctor and recovery
 
@@ -161,7 +161,7 @@ Get-FileHash -LiteralPath $ReportedFile -Algorithm SHA256
 Select-String -LiteralPath $ReportedFile -Pattern "Bun|legacy_atlas_"
 ```
 
-Local `doctor` covers only the known paths above. It cannot prove that a proprietary company fork has no additional loader paths or process cache. Final acceptance requires reinstalling from the latest source on the company computer, terminating every OpenCode process, restarting it, and running `/understand`; preserve the doctor report and complete error text if a problem remains.
+Local `doctor` covers only the known paths above. It cannot prove that a proprietary company fork has no additional loader paths or process cache. Final acceptance requires reinstalling from the latest source on the company computer, terminating every OpenCode process, restarting it, and running `/atlas`; preserve the doctor report and complete error text if a problem remains.
 
 ## Troubleshooting `Bun is not defined`
 
@@ -207,7 +207,7 @@ When a conflict occurs:
 3. If it belongs to company configuration or another plugin, do not move or delete it. Preserve the evidence and ask the OpenCode administrator to resolve the namespace conflict.
 4. Only handle that exact path after confirming it is an old Atlas file and that your backup can be restored. Either restore content matching the old manifest hash before updating, or uninstall first, allow the uninstaller to preserve the modified file, then verify and remove the residue before reinstalling.
 
-Do not blindly delete the ownership manifest, `%USERPROFILE%\.agents\skills\understand`, the OpenCode `tools` directory, or the entire OpenCode configuration directory.
+Do not blindly delete the ownership manifest, `%USERPROFILE%\.agents\skills\atlas`, the OpenCode `tools` directory, or the entire OpenCode configuration directory.
 
 ## Uninstall
 
@@ -217,7 +217,7 @@ Run this from any downloaded Atlas source directory:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 ```
 
-Uninstall requires a valid ownership manifest. A v3 uninstall handles only the private runtime and its single owned Agent Skill; it never deletes an OpenCode tool. SHA-256-based external-file deletion applies only to the Agent Skill, not to any OpenCode tool. A matching Skill hash is removed, while a modified Skill is preserved. After removing a matching Skill, the installer removes only the exact `%USERPROFILE%\.agents\skills\understand` child when it is a normal, non-reparse, empty directory; a nonempty namespace is preserved. This allows a normal install -> uninstall -> reinstall cycle while leaving shared `.agents\skills` untouched. Legacy v1/v2 manifests still use hash matching for their external files. Company projects and OpenCode configuration directories are never removed.
+Uninstall requires a valid ownership manifest. A v3 uninstall handles only the private runtime and its single owned Agent Skill; it never deletes an OpenCode tool. SHA-256-based external-file deletion applies only to the Agent Skill, not to any OpenCode tool. A matching Skill hash is removed, while a modified Skill is preserved. After removing a matching Skill, the installer removes only the exact `%USERPROFILE%\.agents\skills\atlas` child when it is a normal, non-reparse, empty directory; a nonempty namespace is preserved. This allows a normal install -> uninstall -> reinstall cycle while leaving shared `.agents\skills` untouched. Legacy v1/v2 manifests still use hash matching for their external files. Company projects and OpenCode configuration directories are never removed.
 
 `%USERPROFILE%\.legacy-code-atlas\` is the installer's private runtime directory. Uninstall always deletes that directory recursively, including added or modified files. Never use it for personal files or backups.
 
@@ -271,4 +271,4 @@ The analyzer reads source offline. It does not run Java, JSP, SQL, or procedures
 - JSP support covers native forms/links, common Struts 1 `html:*` tags, and Struts 2 `s:*` form/link/url tags. Dynamic actions, namespaces, EL/OGNL, and JavaScript-built URLs require manual inspection.
 - Dynamic URLs, reflection, and missing source may require OpenCode to inspect Atlas-referenced files. Use `read`, `grep`, or `glob` only for canonical relative citations that still resolve inside the project. Do not infer a specific route from a dynamic JSP URL without source evidence.
 
-Do not add undocumented performance, cache, or incremental-scan parameters to OpenCode messages. `/understand` and the CLI manage the cache automatically at `.legacy-code-atlas\cache.json` inside the analyzed project.
+Do not add undocumented performance, cache, or incremental-scan parameters to OpenCode messages. `/atlas` and the CLI manage the cache automatically at `.legacy-code-atlas\cache.json` inside the analyzed project.

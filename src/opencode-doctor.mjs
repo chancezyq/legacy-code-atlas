@@ -97,7 +97,7 @@ function validInstallManifest(manifest, homeDir, platform) {
   }
 
   const toolTarget = path.join(manifest.configDir, "tools", "legacy_atlas.ts");
-  const skillTarget = path.join(homeDir, ".agents", "skills", "understand", "SKILL.md");
+  const skillTarget = path.join(homeDir, ".agents", "skills", "atlas", "SKILL.md");
   if (version === 1) {
     return nonempty(manifest.commandTarget)
       && path.isAbsolute(manifest.commandTarget)

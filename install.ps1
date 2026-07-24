@@ -19,7 +19,7 @@ $InstallDir = Join-Path $HOME ".legacy-code-atlas"
 $OwnerMarker = Join-Path $InstallDir ".legacy-code-atlas-owner.json"
 $TransactionJournal = Join-Path $HOME ".legacy-code-atlas.transaction.json"
 $CliTarget = Join-Path $InstallDir "bin\legacy-code-atlas.mjs"
-$SkillDir = Join-Path $HOME ".agents\skills\understand"
+$SkillDir = Join-Path $HOME ".agents\skills\atlas"
 $SkillTarget = Join-Path $SkillDir "SKILL.md"
 
 function Get-CanonicalPath([string]$Path) {
@@ -1361,10 +1361,10 @@ function Assert-InstallTransactionPreflight {
 
     if ($null -eq $ExistingManifest) {
         if ($null -ne (Get-PathEntryWithoutFollowingTarget $InstallDir)) {
-            throw "拒绝覆盖已有目录：$InstallDir。请确认目录来源后手工处理。"
+            throw "拒绝覆盖已有目录：$InstallDir。若它来自旧版 Legacy Code Atlas（/understand 入口时代），请先用当时下载的源码运行 install.ps1 -Uninstall，再重新安装；否则请确认目录来源后手工处理。"
         }
         if ($null -ne (Get-PathEntryWithoutFollowingTarget $SkillDir)) {
-            throw "拒绝覆盖已有 Agent Skill 文件或目录：$SkillDir。该 namespace 可能来自 Understand-Anything；两个 /understand Skill 不能同时占用同一 namespace。安装器不会覆盖或删除现有文件。请先备份，再按原插件的卸载或禁用流程处理。"
+            throw "拒绝覆盖已有 Agent Skill 文件或目录：$SkillDir。两个 Skill 不能同时占用同一个 /atlas namespace；该目录可能来自旧安装或其他插件。安装器不会覆盖或删除现有文件。请先备份，再按来源插件的卸载或禁用流程处理。"
         }
         return
     }
@@ -1381,7 +1381,7 @@ function Assert-InstallTransactionPreflight {
     }
     if ($ExistingManifest.Version -eq 1 -and
         $null -ne (Get-PathEntryWithoutFollowingTarget $SkillDir)) {
-        throw "拒绝覆盖已有 Agent Skill 文件或目录：$SkillDir。该 namespace 可能来自 Understand-Anything；两个 /understand Skill 不能同时占用同一 namespace。安装器不会覆盖或删除现有文件。请先备份，再按原插件的卸载或禁用流程处理。"
+        throw "拒绝覆盖已有 Agent Skill 文件或目录：$SkillDir。两个 Skill 不能同时占用同一个 /atlas namespace；该目录可能来自旧安装或其他插件。安装器不会覆盖或删除现有文件。请先备份，再按来源插件的卸载或禁用流程处理。"
     }
 }
 
@@ -1465,7 +1465,7 @@ function Replace-SkillFile([psobject]$Transaction) {
     if (-not $Transaction.SkillDirectoryExisted) {
         $skillNamespaceBeforePublish = Get-PathEntryWithoutFollowingTarget $SkillDir
         if ($null -ne $skillNamespaceBeforePublish) {
-            throw "Agent Skill namespace 在预检后已被占用，拒绝发布：$SkillDir。该 namespace 可能来自 Understand-Anything；两个 /understand Skill 不能同时占用同一 namespace。安装器不会覆盖或删除现有文件。请先备份，再按原插件的卸载或禁用流程处理。"
+            throw "Agent Skill namespace 在预检后已被占用，拒绝发布：$SkillDir。两个 Skill 不能同时占用同一个 /atlas namespace；该目录可能来自旧安装或其他插件。安装器不会覆盖或删除现有文件。请先备份，再按来源插件的卸载或禁用流程处理。"
         }
         Assert-NoReparsePointTree $Transaction.SkillTemp
         if ((Get-ContentHash $stagedSkillTarget) -ne $Transaction.SkillSha256) {
@@ -1644,7 +1644,7 @@ if (-not [int]::TryParse($nodeMajorText, [ref]$nodeMajor) -or $nodeMajor -lt 20)
     throw "需要 Node.js 20 或更高版本，当前版本：$nodeVersion"
 }
 
-$SkillSource = Join-Path $SourceRoot "integrations\opencode\skills\understand\SKILL.md"
+$SkillSource = Join-Path $SourceRoot "integrations\opencode\skills\atlas\SKILL.md"
 $requiredFiles = @(
     (Join-Path $SourceRoot "bin\legacy-code-atlas.mjs"),
     (Join-Path $SourceRoot "src\analyzer.mjs"),
@@ -1672,7 +1672,7 @@ Write-Host ""
 Write-Host "下一步："
 Write-Host "  1. 完全关闭并重新打开 OpenCode"
 Write-Host "  2. 在老项目目录启动 OpenCode"
-Write-Host "  3. 单独输入 /understand"
+Write-Host "  3. 单独输入 /atlas"
 Write-Host "  4. 分析完成后，在下一条普通消息中询问功能"
 Write-Host ""
 Write-Host "更新：下载新源码后重新运行本脚本"

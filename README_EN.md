@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-Use `/understand` in your company's OpenCode desktop client to explore legacy JSP, Struts, Java, iBATIS, and SQL Server projects.
+Use `/atlas` in your company's OpenCode desktop client to explore legacy JSP, Struts, Java, iBATIS, and SQL Server projects.
 
 ```text
 JSP / JavaScript
@@ -32,7 +32,7 @@ A company fork does not need to use the same version number. What matters is whe
 
 The fixed commands require PowerShell-compatible or POSIX/Git Bash Shell semantics that expand `$HOME` and `$PWD`; a cmd.exe-only host is unsupported. The first full scan must request the maximum supported timeout. If the foreground limit is still insufficient and the host supports background execution, it must start in the background and wait for `analyze` to finish instead of relying on a short default timeout.
 
-> **`/understand` namespace conflict:** Understand-Anything normally uses `%USERPROFILE%\.agents\skills\understand` too. Two Skills cannot own the same `/understand` entry, and the Atlas installer will not overwrite an existing Skill it does not own. If Understand-Anything is still installed on the company computer, back it up and release that namespace through its own uninstall or disable procedure before installing Atlas. Do not directly delete an unknown Skill directory.
+> **Namespace note:** The Atlas entry point is now `/atlas`, installed at `%USERPROFILE%\.agents\skills\atlas`. It no longer conflicts with Understand-Anything's `/understand` entry at `%USERPROFILE%\.agents\skills\understand`, so the two Skills can coexist. If an older Atlas version (which used the `/understand` entry) is still installed on the company computer, uninstall it first by running `install.ps1 -Uninstall` from that older source download, then install this version. The installer never overwrites an existing Skill directory it does not own; do not directly delete an unknown Skill directory.
 
 ### 2. Install it into OpenCode
 
@@ -50,12 +50,12 @@ Administrator privileges are not required. The installer only copies the downloa
 Open the legacy project directory and start OpenCode there. Your first message must contain only this command:
 
 ```text
-/understand
+/atlas
 ```
 
 The Skill first runs the read-only OpenCode compatibility `doctor`. It runs `analyze` only after `doctor` exits with status `0`, then runs `overview` only after `analyze` succeeds. Each fixed command uses a separate Shell call. Any failure stops the workflow instead of reporting a stale index as refreshed. `doctor` never imports, executes, moves, or deletes an OpenCode tool and does not modify the project.
 
-Do not append a question to `/understand`. Wait for the analysis to finish, then send a separate normal message without a slash. For example:
+Do not append a question to `/atlas`. Wait for the analysis to finish, then send a separate normal message without a slash. For example:
 
 ```text
 Where is the refund approval feature implemented?
@@ -79,7 +79,7 @@ procedure dbo.usp_OrderAudit
 
 For a URL, statement ID, table, or procedure, the Skill keeps the exact source identifier and never substitutes a guess after no match. For a natural-language feature question, your company's existing model converts the request into one concise source-language search candidate; for an English codebase, a Chinese question such as `订单审核功能在哪里？` can become `OrderAudit`. If that natural-language candidate has no match, the Skill may try at most two short alternatives.
 
-Before handling an ordinary question, the Skill uses a metadata-only existence check for `.legacy-code-atlas/index.json`; if it is missing, the Skill asks you to run `/understand` by itself and stops. Once the index exists, it runs the fixed `prepare-query` preflight, OpenCode's structured `write` stores only the selected source-language candidate or exact identifier in `.legacy-code-atlas\query.txt`, and one fixed Node trace command reads it through `--query-file` with `--no-match-ok`. That flag changes only a legitimate no-match exit from status `3` to `0` so bounded natural-language fallback can continue; invalid query, index, file, and runtime failures remain errors. The original message and candidate are never interpolated into a shell command; you do not need to create or edit the file yourself. The answer reports which candidate or candidates were searched.
+Before handling an ordinary question, the Skill uses a metadata-only existence check for `.legacy-code-atlas/index.json`; if it is missing, the Skill asks you to run `/atlas` by itself and stops. Once the index exists, it runs the fixed `prepare-query` preflight, OpenCode's structured `write` stores only the selected source-language candidate or exact identifier in `.legacy-code-atlas\query.txt`, and one fixed Node trace command reads it through `--query-file` with `--no-match-ok`. That flag changes only a legitimate no-match exit from status `3` to `0` so bounded natural-language fallback can continue; invalid query, index, file, and runtime failures remain errors. The original message and candidate are never interpolated into a shell command; you do not need to create or edit the file yourself. The answer reports which candidate or candidates were searched.
 
 Static-artifact checks reject a symlinked or junction-backed `.legacy-code-atlas` directory and a standard `index.json` that is a symlink, junction, or hardlink. `prepare-query` removes only a pre-existing linked `query.txt` entry inside the project before atomically creating a new regular file. `analyze` likewise treats a linked `cache.json` as a cache miss and replaces only the project-local entry. Neither operation follows the link to read or modify its external target.
 
@@ -89,7 +89,7 @@ These checks defend against symlink, junction, and hardlink entries that already
 
 Keep ordinary business candidates short. The logical query is limited to `1024` characters and `64` whitespace-delimited tokens and cannot contain control characters; the outer `.legacy-code-atlas/query.txt` file has a separate `64 KiB` cap. Exceeding a logical limit stops before the index is loaded.
 
-After the source code changes, send `/understand` again as a message on its own. Once analysis finishes, continue asking questions normally. You do not need to run PowerShell or Node.js commands during everyday use.
+After the source code changes, send `/atlas` again as a message on its own. Once analysis finishes, continue asking questions normally. You do not need to run PowerShell or Node.js commands during everyday use.
 
 ## What you can trace
 
@@ -109,10 +109,10 @@ The default installation is under the current Windows user profile:
 
 ```text
 %USERPROFILE%\.legacy-code-atlas\
-%USERPROFILE%\.agents\skills\understand\SKILL.md
+%USERPROFILE%\.agents\skills\atlas\SKILL.md
 ```
 
-The Agent Skill path is always `%USERPROFILE%\.agents\skills\understand\SKILL.md`. It is the only runtime entry point and invokes fixed commands for `%USERPROFILE%\.legacy-code-atlas\bin\legacy-code-atlas.mjs`.
+The Agent Skill path is always `%USERPROFILE%\.agents\skills\atlas\SKILL.md`. It is the only runtime entry point and invokes fixed commands for `%USERPROFILE%\.legacy-code-atlas\bin\legacy-code-atlas.mjs`.
 
 The current source no longer ships `integrations\opencode\tools\legacy_atlas.ts`. The installer does not write `tools\legacy_atlas.ts` or create an OpenCode `tools` directory during a fresh install or manifest-v3 update.
 
@@ -124,7 +124,7 @@ The selected OpenCode configuration directory is still saved as `configDir` in:
 
 In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does not mean that Atlas owns the directory or any tool inside it. A valid v3 manifest has owner `legacy-code-atlas-install-v3` and exactly one `agent-skill` entry in `ownedFiles`.
 
-The old `commands\understand.md` Markdown command has been removed. The current `/understand` entry point is a global Agent Skill. During a v1/v2 upgrade, the installer performs a one-time transactional retirement only for a `legacy_atlas.ts` whose path and SHA-256 are proven by the old manifest. A matching file is moved to a transaction backup and removed after the v3 manifest commits; an already-missing file does not block migration. A modified owned tool or any unowned/duplicate tool is preserved and blocks installation until its origin is verified. No replacement tool is written.
+The old `commands\understand.md` Markdown command has been removed. The current `/atlas` entry point is a global Agent Skill. During a v1/v2 upgrade, the installer performs a one-time transactional retirement only for a `legacy_atlas.ts` whose path and SHA-256 are proven by the old manifest. A matching file is moved to a transaction backup and removed after the v3 manifest commits; an already-missing file does not block migration. A modified owned tool or any unowned/duplicate tool is preserved and blocks installation until its origin is verified. No replacement tool is written.
 
 ## Update and uninstall
 
@@ -142,15 +142,15 @@ To uninstall:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 ```
 
-A v3 uninstall handles only the private runtime and the manifest-owned Agent Skill; it never deletes an OpenCode tool. SHA-256-based external-file deletion applies only to the Agent Skill, not to any OpenCode tool. The Skill is deleted only when its hash still matches the manifest, and a modified Skill is preserved. After deleting a matching Skill, the installer removes only the exact `%USERPROFILE%\.agents\skills\understand` child when it is a normal, non-reparse, empty directory, allowing a normal uninstall followed by reinstall. A nonempty namespace is preserved. The shared `%USERPROFILE%\.agents\skills` directory, company projects, and OpenCode configuration directories are never deleted.
+A v3 uninstall handles only the private runtime and the manifest-owned Agent Skill; it never deletes an OpenCode tool. SHA-256-based external-file deletion applies only to the Agent Skill, not to any OpenCode tool. The Skill is deleted only when its hash still matches the manifest, and a modified Skill is preserved. After deleting a matching Skill, the installer removes only the exact `%USERPROFILE%\.agents\skills\atlas` child when it is a normal, non-reparse, empty directory, allowing a normal uninstall followed by reinstall. A nonempty namespace is preserved. The shared `%USERPROFILE%\.agents\skills` directory, company projects, and OpenCode configuration directories are never deleted.
 
 `%USERPROFILE%\.legacy-code-atlas\` is the installer's private runtime directory. Uninstalling always removes that entire directory recursively, including files that were added or modified inside it. Do not store your own files there.
 
 ## Local cache and full rebuild
 
-Each `/understand` run stores fingerprint-validated, per-file parse results in `.legacy-code-atlas\cache.json` inside the analyzed project. A later scan still reads files and calculates SHA-256 fingerprints, but reuses parse results when both the content and parser schema/version are unchanged.
+Each `/atlas` run stores fingerprint-validated, per-file parse results in `.legacy-code-atlas\cache.json` inside the analyzed project. A later scan still reads files and calculates SHA-256 fingerprints, but reuses parse results when both the content and parser schema/version are unchanged.
 
-Missing, malformed, or incomplete regular cache data is treated as a cache miss. A symlink, hardlink, or removable non-regular entry is replaced only at the project-local path; an entry such as a directory that cannot be safely replaced stops with an error. A cache write error is reported as a diagnostic and does not discard the graph that was already produced. To force a full rebuild, delete the project's `.legacy-code-atlas` directory and run `/understand` again.
+Missing, malformed, or incomplete regular cache data is treated as a cache miss. A symlink, hardlink, or removable non-regular entry is replaced only at the project-local path; an entry such as a directory that cannot be safely replaced stops with an error. A cache write error is reported as a diagnostic and does not discard the graph that was already produced. To force a full rebuild, delete the project's `.legacy-code-atlas` directory and run `/atlas` again.
 
 ## Recommendations for large projects
 
@@ -189,9 +189,9 @@ The scanner also ignores Git/IDE metadata, dependency directories, build output,
 
 ## Troubleshooting
 
-If `/understand` is unavailable, confirm that installation completed successfully, fully exit all OpenCode processes, and start it again. The installer and OpenCode must run as the same Windows user. For a company fork with an unknown version, verify that it can load user-level Agent Skills and run the fixed commands in the Skill; no custom-tool registration interface is required.
+If `/atlas` is unavailable, confirm that installation completed successfully, fully exit all OpenCode processes, and start it again. The installer and OpenCode must run as the same Windows user. For a company fork with an unknown version, verify that it can load user-level Agent Skills and run the fixed commands in the Skill; no custom-tool registration interface is required.
 
-If you see `Bun is not defined`, OpenCode is most likely loading an older, duplicate, or cached Atlas custom tool; it is not a runtime error from the current Skill. Run `install.ps1` again from the latest source directory, fully exit every OpenCode process, and restart it. `/understand` automatically runs the read-only check below first; you can also run it manually from the legacy-project root:
+If you see `Bun is not defined`, OpenCode is most likely loading an older, duplicate, or cached Atlas custom tool; it is not a runtime error from the current Skill. Run `install.ps1` again from the latest source directory, fully exit every OpenCode process, and restart it. `/atlas` automatically runs the read-only check below first; you can also run it manually from the legacy-project root:
 
 ```powershell
 node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") doctor (Get-Location).Path
@@ -199,7 +199,7 @@ node (Join-Path $HOME ".legacy-code-atlas\bin\legacy-code-atlas.mjs") doctor (Ge
 
 `doctor` checks `OPENCODE_CONFIG_DIR`, `%XDG_CONFIG_HOME%\opencode` (or `%USERPROFILE%\.config\opencode` when XDG is unset), `%USERPROFILE%\.opencode`, `configDir` from a valid install manifest, and every `.opencode` directory from the current project up to and including the worktree root. Under each configuration root it inspects only direct `.js` and `.ts` children of `tool` and `tools`; it never recursively scans, executes, or loads them. Project-level locations can be known only inside the actual project, so runtime `doctor` checks them instead of relying on the installer alone.
 
-When it finds a conflict or cannot complete the compatibility check, `doctor` exits with status `4`, stops `/understand`, and reports the exact path, classification, and available SHA-256. Record and back up that individual file, then verify its path, hash, and origin. Move or disable only the reported file, and only after confirming that it is an old Atlas artifact and the backup is restorable. Never delete an entire OpenCode configuration, `tool`, or `tools` directory. See the [detailed OpenCode installation and recovery guide](docs/opencode-en.md).
+When it finds a conflict or cannot complete the compatibility check, `doctor` exits with status `4`, stops `/atlas`, and reports the exact path, classification, and available SHA-256. Record and back up that individual file, then verify its path, hash, and origin. Move or disable only the reported file, and only after confirming that it is an old Atlas artifact and the backup is restorable. Never delete an entire OpenCode configuration, `tool`, or `tools` directory. See the [detailed OpenCode installation and recovery guide](docs/opencode-en.md).
 
 Use these read-only commands to verify the individual file reported by doctor. Enter the full reported path, not a directory:
 
@@ -209,11 +209,11 @@ Get-FileHash -LiteralPath $ReportedFile -Algorithm SHA256
 Select-String -LiteralPath $ReportedFile -Pattern "Bun|legacy_atlas_"
 ```
 
-A clean `doctor` result covers only these known locations. A proprietary company custom-tool loader may use additional paths or a process cache. Final acceptance still requires reinstalling from the latest source on the company computer, terminating every OpenCode process, restarting it, and running `/understand`. If it still fails, preserve the doctor report and complete error text, then verify the actual Skill and tool loader paths.
+A clean `doctor` result covers only these known locations. A proprietary company custom-tool loader may use additional paths or a process cache. Final acceptance still requires reinstalling from the latest source on the company computer, terminating every OpenCode process, restarting it, and running `/atlas`. If it still fails, preserve the doctor report and complete error text, then verify the actual Skill and tool loader paths.
 
 An older worker treated legitimate JSP field names such as `duration`, `worker`, and `node` as worker metadata. It could also misclassify the iBATIS source identifier `/home/job` quoted in a parser warning as a machine path, eventually surfacing only `worker failed`. The current version preserves those values as source data while retaining strict worker-protocol and runtime-diagnostic validation; the same fix also preserves `<url-pattern>/home/*</url-pattern>` and the Java string `C:\\company\\app`. If the error remains after updating, verify that the runtime and Skill came from the same latest installation, then preserve the complete error and triggering file type for diagnosis.
 
-If the first scan is too slow, improve `.legacy-code-atlasignore` or start with a smaller business module. If a query returns no result, run `/understand` again by itself and then ask a new question using a URL, Java class name, fully qualified statement ID, procedure name, or table name.
+If the first scan is too slow, improve `.legacy-code-atlasignore` or start with a smaller business module. If a query returns no result, run `/atlas` again by itself and then ask a new question using a URL, Java class name, fully qualified statement ID, procedure name, or table name.
 
 For manifest-v3 checks, legacy-tool migration, update conflicts, transaction recovery, and the real-Windows release gate, see [OpenCode installation and recovery](docs/opencode-en.md).
 

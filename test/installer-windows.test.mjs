@@ -20,7 +20,7 @@ import {
 
 const installerPath = fileURLToPath(new URL("../install.ps1", import.meta.url));
 const sourceSkillPath = fileURLToPath(new URL(
-  "../integrations/opencode/skills/understand/SKILL.md",
+  "../integrations/opencode/skills/atlas/SKILL.md",
   import.meta.url,
 ));
 const sourceCliPath = fileURLToPath(new URL(
@@ -36,7 +36,7 @@ const sourceRoot = fileURLToPath(new URL("../", import.meta.url));
 const windowsOnly = process.platform === "win32"
   ? false
   : "requires Windows and the built-in Windows PowerShell 5.1 executable";
-const understandSkillCollisionMessage = /Understand-Anything[\s\S]*?两个\s*\/understand\s+Skill[\s\S]*?(?:不能|无法)[\s\S]*?同一\s+namespace[\s\S]*?(?:不会|不)[\s\S]*?覆盖[\s\S]*?删除[\s\S]*?先备份[\s\S]*?原插件[\s\S]*?(?:卸载|禁用)/i;
+const atlasSkillCollisionMessage = /两个\s*Skill[\s\S]*?(?:不能|无法)[\s\S]*?同一个?\s*\/atlas\s+namespace[\s\S]*?(?:不会|不)[\s\S]*?覆盖[\s\S]*?删除[\s\S]*?先备份[\s\S]*?来源插件[\s\S]*?(?:卸载|禁用)/i;
 
 async function pathExists(filePath) {
   try {
@@ -94,7 +94,7 @@ async function assertInstrumentedFailure({ instrumentedInstallerPath, sandbox, m
 function legacyV1TransactionPaths({ sandbox, configDir, id }) {
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
   const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
   const skillTarget = path.join(skillDir, "SKILL.md");
   const toolTarget = path.join(configDir, "tools", "legacy_atlas.ts");
   const commandTarget = path.join(configDir, "commands", "understand.md");
@@ -342,7 +342,7 @@ test("failure instrumentation modifies only an isolated minimal installer source
       "integrations",
       "opencode",
       "skills",
-      "understand",
+      "atlas",
       "SKILL.md",
     )),
     readFile(sourceSkillPath),
@@ -435,7 +435,7 @@ test("Windows smoke uses isolated Windows PowerShell 5.1 to install", { skip: wi
   assert.match(`${result.stdout}\n${result.stderr ?? ""}`, /custom tool[^\r\n]*(?:不依赖|无需)/i);
 
   const runtimeDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
-  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md");
+  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
   const toolTarget = path.join(sandbox.configDir, "tools", "legacy_atlas.ts");
   const toolDir = path.dirname(toolTarget);
   const manifest = await readJson(path.join(runtimeDir, ".legacy-code-atlas-owner.json"));
@@ -480,7 +480,7 @@ test("Windows migrates an unchanged v1 install using its saved config directory"
 
   await runInstaller({ installerPath, sandbox });
 
-  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md");
+  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
   const manifest = await readJson(fixture.ownerMarker);
   const ownedFiles = new Map(manifest.ownedFiles.map((entry) => [entry.kind, entry]));
   assert.equal(manifest.owner, "legacy-code-atlas-install-v3");
@@ -511,7 +511,7 @@ for (const missingKind of ["command", "tool"]) {
 
     const manifest = await readJson(fixture.ownerMarker);
     const ownedFiles = new Map(manifest.ownedFiles.map((entry) => [entry.kind, entry]));
-    const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md");
+    const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
     assert.equal(manifest.owner, "legacy-code-atlas-install-v3");
     assert.equal(manifest.version, 3);
     assert.deepEqual([...ownedFiles.keys()], ["agent-skill"]);
@@ -652,15 +652,15 @@ test("Windows v3 update rejects a modified owned Skill without changing state", 
   });
 });
 
-test("Windows fresh install rejects an unowned understand Skill namespace without changing state", { skip: windowsOnly }, async (t) => {
+test("Windows fresh install rejects an unowned atlas Skill namespace without changing state", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
   await mkdir(skillDir, { recursive: true });
   await writeFile(path.join(skillDir, "SKILL.md"), "# Understand-Anything\n", "utf8");
 
   await assertInstallerRejectsWithUnchangedState({
     sandbox,
-    message: understandSkillCollisionMessage,
+    message: atlasSkillCollisionMessage,
   });
 });
 
@@ -722,7 +722,7 @@ test("Windows fresh install ignores and preserves an unrelated same-size company
 
   assert.deepEqual(await readFile(companyTool), content);
   assert.equal(
-    await pathExists(path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md")),
+    await pathExists(path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md")),
     true,
   );
   await assertNoTransactionArtifacts(sandbox);
@@ -755,16 +755,16 @@ for (const candidate of [
   });
 }
 
-test("Windows v1 migration rejects an existing Understand-Anything Skill without changing state", { skip: windowsOnly }, async (t) => {
+test("Windows v1 migration rejects an existing foreign Skill in the atlas namespace without changing state", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
   await createV1Install(sandbox);
-  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md");
+  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
   await mkdir(path.dirname(skillTarget), { recursive: true });
   await writeFile(skillTarget, "# Understand-Anything\n", "utf8");
 
   await assertInstallerRejectsWithUnchangedState({
     sandbox,
-    message: understandSkillCollisionMessage,
+    message: atlasSkillCollisionMessage,
   });
 });
 
@@ -849,7 +849,7 @@ for (const version of [1, 2, 3]) {
 test("Windows fresh install rejects a junction in an owned target path without following it", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
   const outside = path.join(sandbox.root, "outside-skill-directory");
-  const skillDirectory = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillDirectory = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
   await mkdir(outside, { recursive: true });
   await mkdir(path.dirname(skillDirectory), { recursive: true });
   await writeFile(path.join(outside, "sentinel.txt"), "outside sentinel\n", "utf8");
@@ -903,7 +903,7 @@ for (const phase of ["after-journal", "after-runtime", "after-skill"]) {
     });
 
     const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
-    const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+    const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
     const toolTarget = path.join(sandbox.configDir, "tools", "legacy_atlas.ts");
     assert.equal(await pathExists(installDir), false);
     assert.equal(await pathExists(skillDir), false);
@@ -996,10 +996,10 @@ test("Windows rollback preserves an unowned empty Skill namespace created before
   await assertInstrumentedFailure({
     instrumentedInstallerPath: instrumented.installerPath,
     sandbox,
-    message: understandSkillCollisionMessage,
+    message: atlasSkillCollisionMessage,
   });
 
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
   assert.equal(await pathExists(skillDir), true);
   assert.deepEqual(await readdir(skillDir), []);
   assert.equal(await pathExists(path.join(sandbox.homeDir, ".legacy-code-atlas")), false);
@@ -1177,7 +1177,7 @@ test("Windows crash before staged Skill copy never creates the final Skill names
 
   const journalPath = path.join(sandbox.homeDir, ".legacy-code-atlas.transaction.json");
   const journal = await readJson(journalPath);
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
   assert.equal(await pathExists(journal.skillTemp), true);
   assert.equal(await pathExists(skillDir), false);
 
@@ -1236,7 +1236,7 @@ test("Windows recovery keeps a retired v2 tool absent after the v3 manifest comm
   });
 
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
-  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md");
+  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
   const manifest = await readJson(path.join(installDir, ".legacy-code-atlas-owner.json"));
   assert.equal(manifest.owner, "legacy-code-atlas-install-v3");
   assert.equal(manifest.version, 3);
@@ -1424,7 +1424,7 @@ test("Windows installs, updates, uninstalls, and freshly reinstalls inside a non
   await runInstaller({ installerPath, sandbox });
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
   const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
-  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md");
+  const skillTarget = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
   const toolTarget = path.join(sandbox.configDir, "tools", "legacy_atlas.ts");
   const firstManifest = await readJson(ownerMarker);
   assert.equal(firstManifest.owner, "legacy-code-atlas-install-v3");

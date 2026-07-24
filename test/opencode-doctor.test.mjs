@@ -260,7 +260,7 @@ test("doctor accepts only a structurally valid install manifest config root", as
     configDir: manifestRoot,
     ownedFiles: [{
       kind: "agent-skill",
-      path: path.join(homeDir, ".agents", "skills", "understand", "SKILL.md"),
+      path: path.join(homeDir, ".agents", "skills", "atlas", "SKILL.md"),
       sha256: "a".repeat(64),
     }],
   }), "utf8");

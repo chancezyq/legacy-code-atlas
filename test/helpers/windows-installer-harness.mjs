@@ -207,7 +207,7 @@ export async function createV2Install(sandbox, options = {}) {
     sandbox.homeDir,
     ".agents",
     "skills",
-    "understand",
+    "atlas",
     "SKILL.md",
   );
   const toolTarget = path.join(configDir, "tools", "legacy_atlas.ts");
@@ -263,7 +263,7 @@ export async function createV3Install(sandbox, options = {}) {
   const configDir = options.configDir ?? sandbox.configDir;
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
   const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
   const skillTarget = path.join(skillDir, "SKILL.md");
   const skillContent = options.skillContent ?? "# Installed Legacy Code Atlas Skill\n";
   const skillHash = sha256Bytes(Buffer.from(skillContent, "utf8"));
@@ -350,12 +350,12 @@ export async function createInstrumentedInstaller({
     "integrations",
     "opencode",
     "skills",
-    "understand",
+    "atlas",
     "SKILL.md",
   );
   await mkdir(path.dirname(copiedSkill), { recursive: true });
   await copyFile(
-    path.join(sourceRoot, "integrations", "opencode", "skills", "understand", "SKILL.md"),
+    path.join(sourceRoot, "integrations", "opencode", "skills", "atlas", "SKILL.md"),
     copiedSkill,
   );
 

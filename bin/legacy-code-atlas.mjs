@@ -225,7 +225,7 @@ async function inspectAtlasDirectory(projectRoot, { allowMissing = false } = {})
       return { atlasDirectory, canonicalProjectRoot, canonicalAtlasDirectory: null };
     }
     if (error?.code === "ENOENT") {
-      throw new Error("项目缺少 .legacy-code-atlas 目录，请先运行 /understand");
+      throw new Error("项目缺少 .legacy-code-atlas 目录，请先运行 /atlas");
     }
     throw error;
   }
@@ -249,7 +249,7 @@ async function inspectStandardIndex(projectRoot, { allowMissing = false } = {}) 
     entry = await lstat(indexPath);
   } catch (error) {
     if (allowMissing && error?.code === "ENOENT") return null;
-    if (error?.code === "ENOENT") throw new Error("项目索引不存在，请先运行 /understand");
+    if (error?.code === "ENOENT") throw new Error("项目索引不存在，请先运行 /atlas");
     throw error;
   }
   if (!entry.isFile() || entry.isSymbolicLink()) {

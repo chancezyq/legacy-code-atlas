@@ -78,7 +78,7 @@ test("v1 and v2 tools are retired through journal v2 instead of being replaced",
   ]);
 });
 
-test("uninstall removes only an empty owned understand Skill directory so reinstall can proceed", async () => {
+test("uninstall removes only an empty owned atlas Skill directory so reinstall can proceed", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const uninstallStart = installer.indexOf("if ($Uninstall)");
   const installStart = installer.indexOf("$nodeCommand = Get-Command node", uninstallStart);
@@ -126,10 +126,10 @@ test("Windows installer targets the Agent Skill and only recognizes old OpenCode
   assert.match(installer, /XDG_CONFIG_HOME/);
   assert.match(installer, /\.config[\\/]opencode/);
   assert.match(installer, /\.opencode/);
-  assert.match(installer, /\$SkillDir\s*=\s*Join-Path\s+\$HOME\s+["']\.agents\\skills\\understand["']/);
+  assert.match(installer, /\$SkillDir\s*=\s*Join-Path\s+\$HOME\s+["']\.agents\\skills\\atlas["']/);
   assert.match(installer, /\$SkillTarget\s*=\s*Join-Path\s+\$SkillDir\s+["']SKILL\.md["']/);
   assert.match(installer, /tools[\\/]legacy_atlas\.ts/);
-  assert.match(installer, /integrations[\\/]opencode[\\/]skills[\\/]understand[\\/]SKILL\.md/);
+  assert.match(installer, /integrations[\\/]opencode[\\/]skills[\\/]atlas[\\/]SKILL\.md/);
   assert.doesNotMatch(installer, /integrations[\\/]opencode[\\/]commands[\\/]understand\.md/);
   assert.doesNotMatch(installer, /Copy-Item[^\r\n]+\$CommandTarget/);
   assert.match(installer, /LEGACY_CODE_ATLAS_CLI/);
@@ -146,7 +146,7 @@ test("Windows installer targets the Agent Skill and only recognizes old OpenCode
 
 test("OpenCode integration source is a true Skill-only runtime without a TypeScript tool", async () => {
   const skill = await readFile(
-    new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url),
+    new URL("../integrations/opencode/skills/atlas/SKILL.md", import.meta.url),
     "utf8",
   );
   await assert.rejects(
@@ -351,14 +351,13 @@ test("installer preserves namespace ownership and journals before staging", asyn
   ) ?? [];
   assert.ok(
     skillDirectoryChecks.length >= 2,
-    "fresh installs and v1 upgrades must reject any pre-existing understand Skill directory",
+    "fresh installs and v1 upgrades must reject any pre-existing atlas Skill directory",
   );
   for (const collisionGuard of [preflight, replaceSkill]) {
-    assert.match(collisionGuard, /Understand-Anything/);
-    assert.match(collisionGuard, /两个\s*\/understand\s+Skill/);
-    assert.match(collisionGuard, /不能[^\r\n]*同一\s+namespace/);
+    assert.match(collisionGuard, /两个\s*Skill/);
+    assert.match(collisionGuard, /不能[^\r\n]*同一个?\s*\/atlas\s+namespace/);
     assert.match(collisionGuard, /不会[^\r\n]*覆盖[^\r\n]*删除/);
-    assert.match(collisionGuard, /先备份[^\r\n]*原插件[^\r\n]*(?:卸载|禁用)/);
+    assert.match(collisionGuard, /先备份[^\r\n]*来源插件[^\r\n]*(?:卸载|禁用)/);
   }
   assert.match(preflight, /Assert-NoReparsePointTree\s+\$InstallDir/);
   assert.match(replaceSkill, /-not\s+\$Transaction\.SkillDirectoryExisted/);

@@ -1,23 +1,23 @@
 ---
-name: understand
-description: Use when a user invokes /understand by itself to index a JSP, Struts, Java, iBATIS, or SQL Server legacy project; after /understand succeeds, it also applies to subsequent ordinary questions about the indexed legacy project across later turns and after context recovery.
+name: atlas
+description: Use when a user invokes /atlas by itself to index a JSP, Struts, Java, iBATIS, or SQL Server legacy project; after /atlas succeeds, it also applies to subsequent ordinary questions about the indexed legacy project across later turns and after context recovery.
 ---
 
 # Understand a Legacy Project
 
-This Skill is the `/understand` entry point. It has no arguments. It uses the host Shell only for the fixed Shell commands below and keeps all analysis artifacts in the current project.
+This Skill is the `/atlas` entry point. It has no arguments. It uses the host Shell only for the fixed Shell commands below and keeps all analysis artifacts in the current project.
 
 ## Invocation gate
 
 First, inspect the slash invocation before running any Atlas command.
 
-If `/understand` contains any trailing content or argument, stop. Do not run any Atlas command. Do not pass that content to a command or treat it as an instruction. Only tell the user to run `/understand` by itself, then ask about the desired feature in the next ordinary message.
+If `/atlas` contains any trailing content or argument, stop. Do not run any Atlas command. Do not pass that content to a command or treat it as an instruction. Only tell the user to run `/atlas` by itself, then ask about the desired feature in the next ordinary message.
 
 The fixed command strings require a Shell mode with PowerShell-compatible or POSIX/Git Bash semantics that expands `$HOME` and `$PWD`; a cmd.exe-only host is unsupported. If the host cannot provide those semantics, stop and report the compatibility requirement. Do not translate the commands to cmd.exe syntax or substitute different environment expressions.
 
 For the first full scan, configure the analyze Shell call through tool-call metadata, not the command string, to request the maximum supported timeout. If that foreground timeout is insufficient and the host exposes background execution through supported tool metadata, use it and wait for the analyze call to exit before running overview. Never rely on a short default timeout, and never invent unsupported metadata fields. If neither a sufficient timeout nor background execution with waiting is available, stop and report the host limitation without changing the fixed command.
 
-Otherwise, only when the user invokes `/understand` with no arguments, run this fixed doctor command as one Shell call:
+Otherwise, only when the user invokes `/atlas` with no arguments, run this fixed doctor command as one Shell call:
 
 ```sh
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"
@@ -43,16 +43,16 @@ If any doctor, analyze, or overview call fails, stop immediately, report its exa
 
 Use only fixed commands from this Skill, and use those commands exactly. Do not add user text, flags, URLs, paths, or shell substitutions. If the runtime is missing, report the install path and ask the user to rerun the Windows installer; do not substitute another runtime, a network command, or a project-local executable.
 
-When all three commands succeed, summarize the compatibility check, index status, and overview. Tell the user to ask the desired question in the next ordinary message. Do not append a query to `/understand` or advertise a parameterized form of that command.
+When all three commands succeed, summarize the compatibility check, index status, and overview. Tell the user to ask the desired question in the next ordinary message. Do not append a query to `/atlas` or advertise a parameterized form of that command.
 
 ## Cross-turn and context recovery
 
-After `/understand` succeeds, this Skill remains applicable to every later ordinary question about the indexed legacy project, including questions in a new turn or after context recovery.
+After `/atlas` succeeds, this Skill remains applicable to every later ordinary question about the indexed legacy project, including questions in a new turn or after context recovery.
 
 Before handling any later question, check for the project-local index at `.legacy-code-atlas/index.json` with `glob` or an equivalent metadata-only existence check, not with a Shell command. Do not open the index file. Do not load the index contents into the conversation context.
 
-- If the project index `.legacy-code-atlas/index.json` exists, continue directly with the ordinary-question flow below; do not require another `/understand` invocation.
-- If the project index `.legacy-code-atlas/index.json` is missing, tell the user to run `/understand` by itself and wait for it to succeed before asking the question again.
+- If the project index `.legacy-code-atlas/index.json` exists, continue directly with the ordinary-question flow below; do not require another `/atlas` invocation.
+- If the project index `.legacy-code-atlas/index.json` is missing, tell the user to run `/atlas` by itself and wait for it to succeed before asking the question again.
 
 Do not run any trace command without a valid index or while the index is missing.
 
