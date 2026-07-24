@@ -132,6 +132,14 @@ node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"
 
 所有内容都从索引事实推导并附项目相对引用，不经过模型改写；主流程置信度低于 `0.95` 时会标注含启发式关系需人工复核（文档正文为英文，便于在英文代码库团队中分享）。文档规模有硬上限（每份 1 MiB、用例/页面各 200 个、图各 30/20 个），超出会显式标注截断。这些文档包含源码结构、路径和 SQL，请与索引一样按公司敏感数据管理，只通过公司批准的渠道分享。
 
+也可以只为一个模块或一个功能生成文档：用普通消息提出（例如“为 order 模块生成文档”“生成订单审核功能的文档”），Skill 会像 trace 一样先运行 `prepare-query`，用 structured `write` 把候选写入 `.legacy-code-atlas/query.txt`，再运行固定命令：
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok
+```
+
+候选与模块名完全一致时按模块过滤，否则按功能在索引中搜索；范围文档写入 `.legacy-code-atlas/docs/scoped/<slug>/`，文件头会注明范围。模块或功能文本永远不进入命令行；无匹配时与 trace 相同，最多再尝试两个短候选并报告全部候选。
+
 ## 安装位置
 
 默认安装到当前 Windows 用户目录：

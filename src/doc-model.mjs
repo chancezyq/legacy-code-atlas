@@ -1,4 +1,4 @@
-import { traverseGraph } from "./query.mjs";
+import { searchGraph, traverseGraph } from "./query.mjs";
 
 const MAX_USE_CASES = 200;
 const MAX_PAGES = 200;
@@ -161,7 +161,61 @@ function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget) {
   };
 }
 
-export function buildDocumentModel(graph) {
+const MAX_SCOPE_SLUG_CHARACTERS = 48;
+const MAX_SCOPE_SEARCH_MATCHES = 500;
+
+export function scopeSlug(query) {
+  const slug = String(query ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, MAX_SCOPE_SLUG_CHARACTERS)
+    .replace(/^-+|-+$/gu, "");
+  return slug || "scope";
+}
+
+function resolveScope(query, useCases) {
+  const normalized = String(query).normalize("NFKC").toLowerCase().trim();
+  const moduleNames = new Set(useCases.map((useCase) => useCase.module.toLowerCase()));
+  if (moduleNames.has(normalized)) {
+    return { kind: "module", query: String(query).trim(), matched: true, slug: scopeSlug(query) };
+  }
+  return { kind: "feature", query: String(query).trim(), matched: false, slug: scopeSlug(query) };
+}
+
+function applyScope(scope, graph, useCases, pages) {
+  let keptUseCases;
+  if (scope.kind === "module") {
+    const wanted = scope.query.toLowerCase();
+    keptUseCases = useCases.filter((useCase) => useCase.module.toLowerCase() === wanted);
+  } else {
+    const matches = new Set(
+      searchGraph(graph, scope.query, { limit: MAX_SCOPE_SEARCH_MATCHES }).map((node) => node.id),
+    );
+    keptUseCases = useCases.filter((useCase) => (
+      matches.has(useCase.routeId) || useCase.mainFlow.some((step) => matches.has(step.nodeId))
+    ));
+    scope.matched = keptUseCases.length > 0;
+  }
+
+  const keptRoutes = new Set(keptUseCases.map((useCase) => useCase.route));
+  const keptPagePaths = new Set(
+    keptUseCases.flatMap((useCase) => useCase.triggers.map((trigger) => trigger.pagePath)),
+  );
+  const keptPages = pages.filter((page) => (
+    keptPagePaths.has(page.filePath)
+    || page.actions.some((action) => keptRoutes.has(action.target))
+    || page.arrivals.some((arrival) => keptRoutes.has(arrival.from))
+  ));
+  return { keptUseCases, keptPages };
+}
+
+export function buildDocumentModel(graph, options = {}) {
+  if (options.scopeQuery !== undefined
+    && (typeof options.scopeQuery !== "string" || !options.scopeQuery.trim())) {
+    throw new TypeError("scopeQuery must be a non-empty string");
+  }
   if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
     throw new TypeError("document model requires a validated graph index");
   }
@@ -181,7 +235,7 @@ export function buildDocumentModel(graph) {
     .filter((node) => node.type === "route")
     .sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
   const truncatedUseCases = routes.length > MAX_USE_CASES;
-  const useCases = routes
+  let useCases = routes
     .slice(0, MAX_USE_CASES)
     .map((route) => buildUseCase(graph, route, nodeById, incomingByTarget));
 
@@ -189,9 +243,17 @@ export function buildDocumentModel(graph) {
     .filter((node) => node.type === "page")
     .sort((left, right) => compareText(left.filePath ?? left.name, right.filePath ?? right.name));
   const truncatedPages = pageNodes.length > MAX_PAGES;
-  const pages = pageNodes
+  let pages = pageNodes
     .slice(0, MAX_PAGES)
     .map((page) => buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget));
+
+  let scope = null;
+  if (options.scopeQuery !== undefined) {
+    scope = resolveScope(options.scopeQuery, useCases);
+    const { keptUseCases, keptPages } = applyScope(scope, graph, useCases, pages);
+    useCases = keptUseCases;
+    pages = keptPages;
+  }
 
   const moduleMap = new Map();
   for (const useCase of useCases) {
@@ -202,6 +264,7 @@ export function buildDocumentModel(graph) {
   const modules = [...moduleMap.values()].sort((left, right) => compareText(left.name, right.name));
 
   return {
+    scope,
     modules,
     useCases,
     pages,

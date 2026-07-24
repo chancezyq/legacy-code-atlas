@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, cp } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, cp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -287,7 +287,139 @@ test("docs CLI writes the three documents and reports them", async (t) => {
 test("CLI help documents the docs command", async () => {
   const help = await run(process.execPath, [cli, "--help"]);
   assert.match(help.stdout, /docs <project>[^\n]*--json/);
+  assert.match(help.stdout, /docs <project>[^\n]*--query-file[^\n]*--no-match-ok/);
 });
+
+test("document model scopes to a module by exact name", async () => {
+  const graph = await fixtureGraph();
+  const scoped = buildDocumentModel(graph, { scopeQuery: "order" });
+
+  assert.equal(scoped.scope.kind, "module");
+  assert.equal(scoped.scope.query, "order");
+  assert.ok(scoped.scope.matched);
+  assert.deepEqual(scoped.modules.map((module) => module.name), ["order"]);
+  assert.ok(scoped.useCases.every((useCase) => useCase.module === "order"));
+  assert.ok(scoped.useCases.some((useCase) => useCase.route === "/order/audit.do"));
+  assert.ok(
+    scoped.pages.some((page) => page.filePath === "web/order/audit.jsp"),
+    "pages reachable from scoped use cases must be included",
+  );
+  assert.ok(
+    scoped.pages.every((page) => page.filePath !== "/common/tags.jsp" || scoped.useCases.length > 0),
+  );
+  assert.ok(scoped.stats.useCases < buildDocumentModel(graph).stats.useCases);
+});
+
+test("document model scopes to a feature by search when no module matches", async () => {
+  const graph = await fixtureGraph();
+  const scoped = buildDocumentModel(graph, { scopeQuery: "audit" });
+
+  assert.equal(scoped.scope.kind, "feature");
+  assert.ok(scoped.scope.matched);
+  assert.ok(scoped.useCases.some((useCase) => useCase.route === "/order/audit.do"));
+  assert.ok(
+    scoped.useCases.every((useCase) => /audit/i.test(useCase.route)),
+    "feature scope must only keep use cases whose trace matched",
+  );
+  assert.ok(scoped.pages.some((page) => page.filePath === "web/order/audit.jsp"));
+
+  const noMatch = buildDocumentModel(graph, { scopeQuery: "nonexistent-feature-xyz" });
+  assert.equal(noMatch.scope.matched, false);
+  assert.deepEqual(noMatch.useCases, []);
+  assert.deepEqual(noMatch.pages, []);
+});
+
+test("scoped renderers state the scope in the document header", async () => {
+  const graph = await fixtureGraph();
+  const scoped = buildDocumentModel(graph, { scopeQuery: "order" });
+  const useCases = renderUseCases(scoped);
+  const uiSpec = renderUiSpec(scoped);
+  const diagrams = renderDiagrams(scoped);
+
+  for (const markdown of [useCases, uiSpec, diagrams]) {
+    assert.match(markdown, /Scope: module `order`/);
+  }
+  assert.doesNotMatch(useCases, /## Module api/);
+});
+
+test("docs CLI generates scoped documents from a query file", async (t) => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), "legacy-atlas-docs-scope-"));
+  t.after(() => rm(projectRoot, { recursive: true, force: true }));
+  await cp(fixtureRoot, projectRoot, { recursive: true });
+  await rm(path.join(projectRoot, ".legacy-code-atlas"), { recursive: true, force: true });
+
+  await run(process.execPath, [cli, "analyze", projectRoot]);
+  await run(process.execPath, [cli, "prepare-query", projectRoot]);
+  const queryPath = path.join(projectRoot, ".legacy-code-atlas", "query.txt");
+  await writeFile(queryPath, "order", "utf8");
+
+  const result = await run(process.execPath, [
+    cli, "docs", projectRoot, "--query-file", queryPath, "--no-match-ok",
+  ]);
+  assert.match(result.stdout, /scoped\/order\/use-cases\.md/);
+
+  const scopedDir = path.join(projectRoot, ".legacy-code-atlas", "docs", "scoped", "order");
+  const entries = (await readdir(scopedDir)).sort();
+  assert.deepEqual(entries, ["diagrams.md", "ui-spec.md", "use-cases.md"]);
+  const useCases = await readFile(path.join(scopedDir, "use-cases.md"), "utf8");
+  assert.match(useCases, /Scope: module `order`/);
+  assert.match(useCases, /\/order\/audit\.do/);
+  assert.doesNotMatch(useCases, /## Module api/);
+  assert.equal(useCases.includes(projectRoot), false);
+
+  await run(process.execPath, [cli, "prepare-query", projectRoot]);
+  await writeFile(queryPath, "OrderAudit", "utf8");
+  const featureResult = await run(process.execPath, [
+    cli, "docs", projectRoot, "--query-file", queryPath, "--no-match-ok", "--json",
+  ]);
+  const parsed = JSON.parse(featureResult.stdout);
+  assert.equal(parsed.scope.kind, "feature");
+  assert.ok(parsed.scope.matched);
+  assert.ok(parsed.files.every((file) => file.includes("docs/scoped/orderaudit/")));
+
+  await run(process.execPath, [cli, "prepare-query", projectRoot]);
+  await writeFile(queryPath, "totally-missing-thing", "utf8");
+  const noMatch = await run(process.execPath, [
+    cli, "docs", projectRoot, "--query-file", queryPath, "--no-match-ok",
+  ]);
+  assert.match(noMatch.stdout, /no match/i);
+
+  await run(process.execPath, [cli, "prepare-query", projectRoot]);
+  await writeFile(queryPath, "totally-missing-thing", "utf8");
+  await assert.rejects(
+    run(process.execPath, [cli, "docs", projectRoot, "--query-file", queryPath]),
+    (error) => {
+      assert.equal(error.code, 3);
+      return true;
+    },
+    "without --no-match-ok a no-match scope must exit 3",
+  );
+});
+
+test("scoped docs directory names stay safe for hostile queries", async (t) => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), "legacy-atlas-docs-slug-"));
+  t.after(() => rm(projectRoot, { recursive: true, force: true }));
+  await cp(fixtureRoot, projectRoot, { recursive: true });
+  await rm(path.join(projectRoot, ".legacy-code-atlas"), { recursive: true, force: true });
+
+  await run(process.execPath, [cli, "analyze", projectRoot]);
+  await run(process.execPath, [cli, "prepare-query", projectRoot]);
+  const queryPath = path.join(projectRoot, ".legacy-code-atlas", "query.txt");
+  await writeFile(queryPath, "../..\\evil order", "utf8");
+
+  const result = await run(process.execPath, [
+    cli, "docs", projectRoot, "--query-file", queryPath, "--no-match-ok", "--json",
+  ]);
+  const parsed = JSON.parse(result.stdout);
+  for (const file of parsed.files ?? []) {
+    assert.match(file, /^\.legacy-code-atlas\/docs\/scoped\/[a-z0-9-]+\/[a-z-]+\.md$/);
+  }
+  const scopedRoot = path.join(projectRoot, ".legacy-code-atlas", "docs", "scoped");
+  for (const entry of await readdir(scopedRoot)) {
+    assert.match(entry, /^[a-z0-9-]+$/, "scope directory names must be slugs");
+  }
+});
+
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   // executed directly: nothing extra

@@ -127,6 +127,14 @@ It deterministically generates three Markdown documents inside the project:
 
 Every statement is derived from index facts with project-relative citations and no model rewriting. A main flow whose minimum confidence is below `0.95` is marked as containing heuristic relationships that need manual review. Output sizes are hard-capped (1 MiB per file, 200 use cases/pages, 30 flowcharts, 20 sequence diagrams) with explicit truncation notices. The documents contain source structure, paths, and SQL — treat them as company-sensitive data like the index and share them only through approved channels.
 
+You can also generate documents for a single module or a single feature. Ask in an ordinary message (for example "generate docs for the order module" or "document the order audit feature"); the Skill runs `prepare-query` first, writes the candidate to `.legacy-code-atlas/query.txt` through the structured `write` tool exactly as traces do, and then runs the fixed command:
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok
+```
+
+A candidate that exactly matches a module name filters by module; anything else scopes by feature search over the index. Scoped files are written to `.legacy-code-atlas/docs/scoped/<slug>/` and state their scope in the header. The module or feature text never enters the command line; on no match, the same bounded fallback as traces applies — at most two short alternative candidates, all reported.
+
 ## Installation locations
 
 The default installation is under the current Windows user profile:

@@ -364,6 +364,16 @@ test("atlas generates shareable documents through one fixed docs command", async
   assert.match(section, /\.legacy-code-atlas[\\/]docs[\\/]diagrams\.md/);
   assert.match(section, /(?:do not|never)[^\n]+(?:add|append)[^\n]+(?:flag|user text)/i);
   assert.match(section, /sensitive/i);
+
+  const scopedDocs = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok';
+  const scopedBlock = shellBlocks.find((match) => match[1].trim() === scopedDocs);
+  assert.ok(scopedBlock, "scoped docs must be one fixed Shell call");
+  assert.match(section, /module[^\n]+feature|feature[^\n]+module/i);
+  assert.match(section, /prepare-query/);
+  assert.match(section, /structured\s+`write`/i);
+  assert.match(section, /never place[^\n]+(?:module|feature)[^\n]+command line/i);
+  assert.match(section, /docs[\\/]scoped[\\/]/);
+  assert.match(section, /(?:at most|maximum of)[^\n]+two[^\n]+alternative[^\n]+candidate/i);
 });
 
 test("the legacy understand Markdown command is removed", async () => {

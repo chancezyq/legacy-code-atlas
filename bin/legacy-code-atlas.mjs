@@ -13,7 +13,7 @@ import {
   validateGraphIndex,
 } from "../src/index-validation.mjs";
 import { searchGraph, traceFeature, traceProcedure, traceStatement, traceTable, traceUrl } from "../src/query.mjs";
-import { buildDocumentModel } from "../src/doc-model.mjs";
+import { buildDocumentModel, scopeSlug } from "../src/doc-model.mjs";
 import { renderDiagrams, renderUiSpec, renderUseCases } from "../src/doc-render.mjs";
 import { renderInlineText, renderTraceMarkdown } from "../src/render.mjs";
 import { inspectOpenCodeCompatibility, renderOpenCodeDoctor } from "../src/opencode-doctor.mjs";
@@ -25,6 +25,7 @@ Usage:
   legacy-code-atlas doctor <project> [--json]
   legacy-code-atlas analyze <project> [--output <index.json>] [--main-thread] [--json]
   legacy-code-atlas docs <project> [--json]
+  legacy-code-atlas docs <project> --query-file <path> [--no-match-ok] [--json]
   legacy-code-atlas prepare-query <project>
   legacy-code-atlas overview <project-or-index> [--json]
   legacy-code-atlas search <project-or-index> <term> [--json]
@@ -394,10 +395,10 @@ async function main() {
   if (queryFile !== null && queryParts.length > 0) {
     throw new Error("不能同时使用查询参数和 --query-file");
   }
-  if (queryFile !== null && !TRACE_HANDLERS[command]) {
+  if (queryFile !== null && !TRACE_HANDLERS[command] && command !== "docs") {
     throw new Error(`命令 ${command} 不支持 --query-file`);
   }
-  if (noMatchOk && !TRACE_HANDLERS[command]) {
+  if (noMatchOk && !TRACE_HANDLERS[command] && command !== "docs") {
     throw new Error(`命令 ${command} 不支持 --no-match-ok`);
   }
   if (noMatchOk && queryFile === null) {
@@ -453,9 +454,16 @@ async function main() {
     const project = path.resolve(input);
     const projectMetadata = await stat(project);
     if (!projectMetadata.isDirectory()) throw new Error("docs 需要项目目录");
+    let scopeQuery;
+    if (queryFile !== null) {
+      scopeQuery = await readQueryFile(queryFile, project);
+      validateLogicalQuery(scopeQuery);
+    }
     const graph = await loadGraph(project);
-    const model = buildDocumentModel(graph);
-    const docsDir = path.join(project, ATLAS_DIRECTORY_NAME, "docs");
+    const model = buildDocumentModel(graph, scopeQuery === undefined ? {} : { scopeQuery });
+    const docsDir = scopeQuery === undefined
+      ? path.join(project, ATLAS_DIRECTORY_NAME, "docs")
+      : path.join(project, ATLAS_DIRECTORY_NAME, "docs", "scoped", scopeSlug(scopeQuery));
     const documents = [
       ["use-cases.md", renderUseCases(model)],
       ["ui-spec.md", renderUiSpec(model)],
@@ -465,17 +473,25 @@ async function main() {
     for (const [fileName, content] of documents) {
       const target = path.join(docsDir, fileName);
       await writeFileAtomic(target, content);
-      files.push(path.join(ATLAS_DIRECTORY_NAME, "docs", fileName).replaceAll("\\", "/"));
+      files.push(path.relative(project, target).replaceAll("\\", "/"));
     }
+    const scope = model.scope
+      ? { kind: model.scope.kind, query: model.scope.query, matched: model.scope.matched }
+      : null;
     if (json) {
-      process.stdout.write(`${JSON.stringify({ files, stats: model.stats, truncated: model.truncated }, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify({ files, scope, stats: model.stats, truncated: model.truncated }, null, 2)}\n`);
     } else {
+      const scopeSummary = scope
+        ? [`范围：${scope.kind === "module" ? "模块" : "功能"} ${scope.query}${scope.matched ? "" : "（no match，未找到匹配，文档为空）"}`]
+        : [];
       process.stdout.write([
         `文档生成完成：${model.stats.useCases} 个用例，${model.stats.pages} 个页面，${model.stats.modules} 个模块`,
+        ...scopeSummary,
         ...files.map((file) => `- ${file}`),
         "",
       ].join("\n"));
     }
+    if (scope && !scope.matched && !noMatchOk) process.exitCode = 3;
     return;
   }
 
