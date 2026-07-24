@@ -93,12 +93,12 @@ test("rendered use cases cite evidence and never leak machine paths", async () =
   const graph = await fixtureGraph();
   const markdown = renderUseCases(buildDocumentModel(graph));
 
-  assert.match(markdown, /^# 用例规格/m);
-  assert.match(markdown, /## 模块 order/);
+  assert.match(markdown, /^# Use Case Specifications/m);
+  assert.match(markdown, /## Module order/);
   assert.match(markdown, /\/order\/audit\.do/);
   assert.match(markdown, /web\/order\/audit\.jsp:\d+/);
   assert.match(markdown, /dbo\.t_order_audit_log/);
-  assert.match(markdown, /写/);
+  assert.match(markdown, /\(write\)/);
   assertNoMachinePaths(markdown);
 });
 
@@ -106,7 +106,7 @@ test("rendered UI spec covers page fields, actions, and arrival paths", async ()
   const graph = await fixtureGraph();
   const markdown = renderUiSpec(buildDocumentModel(graph));
 
-  assert.match(markdown, /^# 界面规格/m);
+  assert.match(markdown, /^# UI Specifications/m);
   assert.match(markdown, /audit\.jsp/);
   assert.match(markdown, /orderId/);
   assert.match(markdown, /decision/);
@@ -120,7 +120,7 @@ test("rendered diagrams are valid Mermaid with escaped labels", async () => {
   const model = buildDocumentModel(graph);
   const markdown = renderDiagrams(model);
 
-  assert.match(markdown, /^# 系统图/m);
+  assert.match(markdown, /^# System Diagrams/m);
   const mermaidBlocks = [...markdown.matchAll(/```mermaid\r?\n([\s\S]*?)```/g)];
   assert.ok(mermaidBlocks.length >= 2, "must emit at least one flowchart and one sequence diagram");
   assert.ok(mermaidBlocks.some((block) => /^flowchart LR/m.test(block[1])));
@@ -213,7 +213,7 @@ test("renderers cap output size with an explicit truncation notice", () => {
   assert.ok(model.truncated, "model must flag dropped use cases beyond the cap");
   assert.ok(model.useCases.length <= 200);
   const markdown = renderUseCases(model);
-  assert.match(markdown, /已截断/);
+  assert.match(markdown, /truncated/);
 });
 
 test("table access classification distinguishes read, write, and read-write", () => {

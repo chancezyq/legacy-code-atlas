@@ -105,7 +105,13 @@ Combinatorial path traversal expands at most `5,000` states and returns at most 
 
 ## Generating shareable documents (UCS / UIS / diagrams)
 
-After the index exists, ask OpenCode for use case documents, UI documents, diagrams, or shareable documents. The Skill runs one fixed command:
+After the index exists, send the command below on its own (`docs` is the only permitted argument), or simply ask in an ordinary message for use case documents, UI documents, diagrams, or shareable documents:
+
+```text
+/atlas docs
+```
+
+The Skill runs one fixed command:
 
 ```sh
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"

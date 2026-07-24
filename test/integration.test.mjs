@@ -195,7 +195,7 @@ test("atlas defines index state handling after context recovery", async () => {
 test("atlas rejects trailing slash-command content before calling Atlas", async () => {
   const atlasSkill = await readFile(new URL("../integrations/opencode/skills/atlas/SKILL.md", import.meta.url), "utf8");
   const inspectIndex = atlasSkill.search(/first, inspect the slash invocation before running any Atlas command/i);
-  const refusal = atlasSkill.match(/if `\/atlas` contains any trailing content or argument,([\s\S]*?)(?=\n\notherwise,)/i);
+  const refusal = atlasSkill.match(/if `\/atlas` contains any other trailing content or argument,([\s\S]*?)(?=\n\notherwise,)/i);
   const doctorIndex = atlasSkill.search(/otherwise,[^\n]+only when[^\n]+no arguments[^\n]+run[^\n]+doctor/i);
 
   assert.notEqual(inspectIndex, -1, "the invocation must be inspected before any tool call");
@@ -207,6 +207,11 @@ test("atlas rejects trailing slash-command content before calling Atlas", async 
   assert.match(refusal[0], /next ordinary message/i);
   assert.ok(inspectIndex < refusal.index, "inspection must precede the refusal branch");
   assert.ok(refusal.index < doctorIndex, "the refusal branch must precede the no-argument doctor branch");
+  assert.match(
+    atlasSkill,
+    /`\/atlas docs`[^\n]+(?:exact literal|only permitted argument)/i,
+    "docs must be the single allowed argument form",
+  );
 });
 
 test("atlas routes later ordinary-language questions through fixed CLI commands", async () => {
@@ -348,6 +353,7 @@ test("atlas generates shareable documents through one fixed docs command", async
 
   assert.ok(docsBlock, "docs must be one fixed Shell call");
   const section = markdownSection(atlasSkill, "Shareable documents");
+  assert.match(section, /`\/atlas docs`/, "the docs slash form must trigger this section");
   assert.match(section, /use case|use-case/i);
   assert.match(section, /UI spec|ui-spec/i);
   assert.match(section, /diagram/i);
@@ -403,12 +409,13 @@ test("user documentation shows only standalone atlas invocations", async () => {
       .filter((line) => !line.includes("`") && !line.startsWith("#"));
 
     assert.ok(codeExamples.length > 0, `${name} must show the slash invocation`);
+    const allowed = new Set(["/atlas", "/atlas docs"]);
     assert.deepEqual(
-      [...new Set(codeExamples)],
-      ["/atlas"],
-      `${name} must never append a query to /atlasSkill`,
+      [...new Set(codeExamples)].filter((line) => !allowed.has(line)),
+      [],
+      `${name} must only show /atlas alone or the literal /atlas docs`,
     );
-    assert.doesNotMatch(content, /\/atlas[ \t]+(?=[^`\r\n])/);
+    assert.doesNotMatch(content, /\/atlas[ \t]+(?!docs\b)(?=[^`\r\n])/);
   }
 
   assert.match(readme, /^退款审核功能在哪里？$/m);
