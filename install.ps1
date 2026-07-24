@@ -206,7 +206,7 @@ function Assert-SkillCliProtocolContent([string]$Path) {
     $content = Get-Utf8Text $Path
     $requiredFragments = @(
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"',
-        'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"',
+        'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD" --main-thread',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" trace-url "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',

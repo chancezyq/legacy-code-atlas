@@ -33,11 +33,11 @@ The Skill runs these fixed commands as three separate Shell calls. `doctor` is a
 
 ```sh
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"
-node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD" --main-thread
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"
 ```
 
-`doctor` never imports, executes, moves, or deletes an OpenCode tool and does not modify the project; it only scans directories with an entry limit and reads bounded candidate files. A conflict or incomplete compatibility check exits with status `4`, and the Skill stops. Unavailable worker threads are only a warning because the analyzer can fall back to the main thread.
+`doctor` never imports, executes, moves, or deletes an OpenCode tool and does not modify the project; it only scans directories with an entry limit and reads bounded candidate files. A conflict or incomplete compatibility check exits with status `4`, and the Skill stops. Unavailable worker threads are only a warning because the fixed `--main-thread` flag keeps the whole analysis on the main thread; hosts that cannot start Node `worker_threads` from a Skill Shell call still analyze correctly.
 
 Wait for analysis to finish. Then send a separate normal message containing a business description, URL, iBATIS statement ID, SQL Server procedure, or table name. For example:
 

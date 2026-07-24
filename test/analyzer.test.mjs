@@ -101,6 +101,7 @@ test("detailed analyzer composes the parallel pipeline and keeps observations ou
 
   const detailed = await analyzeProjectDetailed(root, {
     workers: 2,
+    mainThread: true,
     scanConcurrency: 3,
     ignore: ["generated/**"],
     maxFileBytes: 99,
@@ -128,6 +129,7 @@ test("detailed analyzer composes the parallel pipeline and keeps observations ou
   assert.deepEqual(calls[1].slice(1), [files, { targetBytes: 100, maxFiles: 4 }]);
   assert.deepEqual(calls[2].slice(1), [plan, {
     workers: 2,
+    mainThread: true,
     workerUrl,
     workerFactory,
     workerData: { mode: "test" },

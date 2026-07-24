@@ -128,7 +128,8 @@ test("understand is a no-argument OpenCode Agent Skill", async () => {
   assert.doesNotMatch(understand, /legacy_atlas_/);
   assert.match(understand, /only when the user invokes `\/understand` with no arguments/i);
   assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+doctor\s+"?\$PWD"?/i);
-  assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+analyze\s+"?\$PWD"?/i);
+  assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+analyze\s+"?\$PWD"?\s+--main-thread/i);
+  assert.match(understand, /main thread[^\n]+(?:worker_threads|worker threads)/i);
   assert.match(understand, /node\s+"?\$HOME\/[.]legacy-code-atlas\/bin\/legacy-code-atlas\.mjs"?\s+overview\s+"?\$PWD"?/i);
   assert.match(understand, /next ordinary message/i);
   assert.match(understand, /do not append[^\n]+`\/understand`/i);
@@ -138,7 +139,7 @@ test("understand gates analysis on a separate successful doctor Shell call", asy
   const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
   const shellBlocks = [...understand.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)];
   const doctor = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" doctor "$PWD"';
-  const analyze = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"';
+  const analyze = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD" --main-thread';
   const doctorBlock = shellBlocks.find((match) => match[1].trim() === doctor);
   const analyzeBlock = shellBlocks.find((match) => match[1].trim() === analyze);
 
@@ -153,7 +154,7 @@ test("understand gates analysis on a separate successful doctor Shell call", asy
 test("understand gates overview on a separate successful analyze Shell call", async () => {
   const understand = await readFile(new URL("../integrations/opencode/skills/understand/SKILL.md", import.meta.url), "utf8");
   const shellBlocks = [...understand.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)];
-  const analyze = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"';
+  const analyze = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD" --main-thread';
   const overview = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" overview "$PWD"';
   const analyzeBlock = shellBlocks.find((match) => match[1].trim() === analyze);
   const overviewBlock = shellBlocks.find((match) => match[1].trim() === overview);

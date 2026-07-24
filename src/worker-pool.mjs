@@ -527,6 +527,47 @@ async function processOnMain(files, options) {
   return results;
 }
 
+function contractErrorResult(file) {
+  const relativePath = canonicalRelativePath(file);
+  return {
+    status: "operational-error",
+    relativePath,
+    parserKind: parserKindFor(file),
+    fingerprint: null,
+    metadata: { size: file.size, mtimeMs: file.mtimeMs },
+    record: null,
+    reused: false,
+    diagnostics: [{
+      code: "file-processing-contract-error",
+      relativePath,
+      operation: "process",
+      message: "Unable to validate processed source file",
+    }],
+  };
+}
+
+async function processOnMainThread(plan, options) {
+  const results = [];
+  for (const file of plan.allFiles) {
+    throwIfAborted(options.signal);
+    let validated;
+    try {
+      const result = await options.mainThreadProcessor(file, {
+        signal: options.signal,
+        cached: cachedFor(file, options.cached),
+      });
+      throwIfAborted(options.signal);
+      validated = validateResults([result], [file]);
+    } catch (error) {
+      if (error?.name === "AbortError" || options.signal?.aborted) throw createAbortError();
+      if (!(error instanceof WorkerFailure)) throw error;
+      validated = validateResults([contractErrorResult(file)], [file]);
+    }
+    results.push(...validated);
+  }
+  return validateResults(results, plan.allFiles);
+}
+
 async function runWorkers(plan, options) {
   const workerCount = Math.min(options.workers, plan.batches.length);
   const handles = new Set();
@@ -680,9 +721,13 @@ async function runWorkers(plan, options) {
 
 export async function processFileBatches(input, options = {}) {
   throwIfAborted(options.signal);
+  if (options.mainThread !== undefined && typeof options.mainThread !== "boolean") {
+    throw new TypeError("mainThread must be a boolean");
+  }
   const plan = normalizePlan(input);
   const resolved = {
     workers: resolveWorkerCount(options.workers),
+    mainThread: options.mainThread === true,
     workerUrl: options.workerUrl ?? DEFAULT_WORKER_URL,
     workerFactory: options.workerFactory ?? ((url, workerOptions) => new Worker(url, workerOptions)),
     workerData: options.workerData,
@@ -697,6 +742,9 @@ export async function processFileBatches(input, options = {}) {
   if (typeof resolved.workerFactory !== "function") throw new TypeError("workerFactory must be a function");
   if (typeof resolved.mainThreadProcessor !== "function") {
     throw new TypeError("mainThreadProcessor must be a function");
+  }
+  if (resolved.mainThread) {
+    return processOnMainThread(plan, resolved);
   }
   if (plan.batches.length === 0) {
     return processOnMain(plan.metadata, resolved);

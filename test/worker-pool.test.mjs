@@ -101,6 +101,60 @@ test("resolveWorkerCount uses the bounded CPU default and validates overrides", 
   }
 });
 
+test("main-thread compatibility mode constructs no workers", async (t) => {
+  const { files } = await projectFiles(t, [
+    ["src/A.java", "class A {}"],
+    ["src/B.java", "class B {}"],
+  ]);
+  let constructorCalls = 0;
+  const processed = [];
+
+  const results = await processFileBatches(plan(files), {
+    mainThread: true,
+    workerFactory() {
+      constructorCalls += 1;
+      throw new Error("worker construction must be bypassed");
+    },
+    async mainThreadProcessor(file, options) {
+      processed.push(file.relativePath);
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.equal(constructorCalls, 0);
+  assert.deepEqual(processed, ["src/A.java", "src/B.java"]);
+  assert.deepEqual(results.map((result) => result.relativePath), ["src/A.java", "src/B.java"]);
+});
+
+test("main-thread compatibility mode isolates an invalid file result", async (t) => {
+  const { files } = await projectFiles(t, [
+    ["src/Broken.java", "class Broken {}"],
+    ["src/Healthy.java", "class Healthy {}"],
+  ]);
+
+  const results = await processFileBatches(plan(files), {
+    mainThread: true,
+    async mainThreadProcessor(file, options) {
+      if (file.relativePath === "src/Broken.java") {
+        return { status: "malformed-worker-result", absolutePath: file.absolutePath };
+      }
+      return readAndProcessFile(file, options);
+    },
+  });
+
+  assert.deepEqual(results.map((result) => [result.relativePath, result.status]), [
+    ["src/Broken.java", "operational-error"],
+    ["src/Healthy.java", "parsed"],
+  ]);
+  assert.deepEqual(results[0].diagnostics, [{
+    code: "file-processing-contract-error",
+    relativePath: "src/Broken.java",
+    operation: "process",
+    message: "Unable to validate processed source file",
+  }]);
+  assert.equal(JSON.stringify(results).includes(files[0].absolutePath), false);
+});
+
 test("real workers return identical sorted facts with 1, 2, or 8 workers and reversed completion", async (t) => {
   const entries = Array.from({ length: 10 }, (_, index) => [
     `src/F${String(index).padStart(2, "0")}.java`,

@@ -28,8 +28,10 @@ The doctor is read-only and does not modify, move, or delete any OpenCode tool o
 If and only if the doctor call exits with status `0`, run this fixed analyze command as a second separate Shell call:
 
 ```sh
-node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD" --main-thread
 ```
+
+The fixed `--main-thread` flag keeps the whole analysis on the Node main thread instead of `worker_threads`, because some OpenCode hosts cannot start worker threads from a Skill Shell call. Do not remove the flag, and do not add any other flag.
 
 If and only if that analyze call exits with status `0`, make a third separate Shell call for overview:
 

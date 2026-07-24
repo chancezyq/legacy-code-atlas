@@ -21,7 +21,7 @@ const HELP = `Legacy Code Atlas
 
 Usage:
   legacy-code-atlas doctor <project> [--json]
-  legacy-code-atlas analyze <project> [--output <index.json>] [--json]
+  legacy-code-atlas analyze <project> [--output <index.json>] [--main-thread] [--json]
   legacy-code-atlas prepare-query <project>
   legacy-code-atlas overview <project-or-index> [--json]
   legacy-code-atlas search <project-or-index> <term> [--json]
@@ -60,6 +60,7 @@ function parseArguments(argv) {
   let output = "";
   let queryFile = null;
   let noMatchOk = false;
+  let mainThread = false;
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--json") json = true;
     else if (argv[index] === "--output") {
@@ -74,9 +75,12 @@ function parseArguments(argv) {
     } else if (argv[index] === "--no-match-ok") {
       if (noMatchOk) throw new Error("--no-match-ok 不能重复使用");
       noMatchOk = true;
+    } else if (argv[index] === "--main-thread") {
+      if (mainThread) throw new Error("--main-thread 不能重复使用");
+      mainThread = true;
     } else positional.push(argv[index]);
   }
-  return { positional, json, output, queryFile, noMatchOk };
+  return { positional, json, output, queryFile, noMatchOk, mainThread };
 }
 
 async function writeIndex(graph, outputPath) {
@@ -374,7 +378,7 @@ function renderSearch(results, query) {
 }
 
 async function main() {
-  const { positional, json, output, queryFile, noMatchOk } = parseArguments(process.argv.slice(2));
+  const { positional, json, output, queryFile, noMatchOk, mainThread } = parseArguments(process.argv.slice(2));
   const [command, input, ...queryParts] = positional;
   if (!command || command === "help" || command === "--help" || command === "-h") {
     process.stdout.write(HELP);
@@ -394,6 +398,9 @@ async function main() {
   }
   if (noMatchOk && queryFile === null) {
     throw new Error("--no-match-ok 只能与 --query-file 一起使用");
+  }
+  if (mainThread && command !== "analyze") {
+    throw new Error(`命令 ${command} 不支持 --main-thread`);
   }
 
   if (command === "doctor") {
@@ -422,6 +429,7 @@ async function main() {
     const cachePath = path.join(project, ATLAS_DIRECTORY_NAME, "cache.json");
     const cached = await loadProjectCache(cachePath);
     const detailed = await analyzeProjectDetailed(project, {
+      ...(mainThread ? { mainThread: true } : {}),
       cached,
       cacheWriter: (results, { signal }) => saveFileCache(
         cachePath,

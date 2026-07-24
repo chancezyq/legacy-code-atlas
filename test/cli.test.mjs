@@ -40,6 +40,7 @@ test("CLI help documents --query-file for every trace command", async () => {
   const help = await run(process.execPath, [cli, "--help"]);
 
   assert.match(help.stdout, /doctor <project>/);
+  assert.match(help.stdout, /analyze <project>[^\n]+--main-thread/);
   assert.match(help.stdout, /prepare-query <project>/);
 
   for (const command of [

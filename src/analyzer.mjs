@@ -398,6 +398,7 @@ export async function analyzeProjectDetailed(projectRoot, options = {}) {
 
   const rawResults = await dependencies.processFileBatches(plan, selectDefined(options, [
     "workers",
+    "mainThread",
     "workerUrl",
     "workerFactory",
     "workerData",
