@@ -120,9 +120,9 @@ node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"
 It deterministically generates three Markdown documents inside the project:
 
 ```text
-.legacy-code-atlas/docs/use-cases.md   Use case specifications (UCS): grouped by module, with entry points, main flows, table access, and file:line citations
-.legacy-code-atlas/docs/ui-spec.md     UI specifications (UIS): visible text, form fields, page actions, and arrival paths for each JSP page
-.legacy-code-atlas/docs/diagrams.md    Diagrams: Mermaid module overview flowcharts and use-case sequence diagrams; GitHub/GitLab render them natively
+.legacy-code-atlas/docs/use-cases.md   Use case specifications (UCS): grouped by module, with entry points, request methods and parameters, inputs, main flows, outcomes (forwards/redirects), SQL statements, table access, a per-module data access matrix, and file:line citations
+.legacy-code-atlas/docs/ui-spec.md     UI specifications (UIS): visible text, a form-field table with default values, page actions with HTTP methods, and arrival paths for each JSP page
+.legacy-code-atlas/docs/diagrams.md    Diagrams: a Mermaid screen-navigation map, module overview flowcharts with legends (dashed edges mark heuristic relationships), and use-case sequence diagrams; GitHub/GitLab render them natively
 ```
 
 Every statement is derived from index facts with project-relative citations and no model rewriting. A main flow whose minimum confidence is below `0.95` is marked as containing heuristic relationships that need manual review. Output sizes are hard-capped (1 MiB per file, 200 use cases/pages, 30 flowcharts, 20 sequence diagrams) with explicit truncation notices. The documents contain source structure, paths, and SQL — treat them as company-sensitive data like the index and share them only through approved channels.

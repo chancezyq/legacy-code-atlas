@@ -26,6 +26,7 @@ const FLOW_EDGE_TYPES = [
   "puts",
 ];
 const TRIGGER_EDGE_TYPES = new Set(["submits_to", "links_to", "requests"]);
+const OUTCOME_EDGE_TYPES = new Set(["forwards_to", "redirects_to"]);
 const PAGE_ACTION_EDGE_TYPES = new Set(["submits_to", "links_to", "requests"]);
 const PAGE_ARRIVAL_EDGE_TYPES = new Set(["forwards_to", "redirects_to", "includes", "uses_tile"]);
 
@@ -54,7 +55,67 @@ function accessLabel(reads, writes) {
   return writes ? "write" : "read";
 }
 
-function buildUseCase(graph, route, nodeById, incomingByTarget) {
+function requestSummary(route) {
+  const hints = Array.isArray(route.data?.requestHints) ? route.data.requestHints : [];
+  const methods = new Set();
+  const parameters = new Set();
+  for (const hint of hints) {
+    if (typeof hint?.method === "string" && hint.method) methods.add(hint.method.toUpperCase());
+    for (const name of Object.keys(hint?.parameters ?? {})) parameters.add(name);
+  }
+  return {
+    methods: [...methods].sort(compareText),
+    parameters: [...parameters].sort(compareText),
+  };
+}
+
+function useCaseOutcomes(route, nodeById, outgoingBySource) {
+  const outcomes = [];
+  for (const edge of outgoingBySource.get(route.id) ?? []) {
+    if (!OUTCOME_EDGE_TYPES.has(edge.type)) continue;
+    const target = nodeById.get(edge.target);
+    if (!target) continue;
+    outcomes.push({
+      kind: edge.type,
+      target: target.name,
+      reason: edge.reason ?? "",
+      confidence: typeof edge.confidence === "number" ? edge.confidence : 1,
+      evidence: firstEvidence(edge),
+    });
+  }
+  return outcomes.sort((left, right) => compareText(left.reason, right.reason)
+    || compareText(left.target, right.target));
+}
+
+function useCaseInputs(triggers, nodeById) {
+  const inputs = [];
+  const seen = new Set();
+  for (const trigger of triggers) {
+    if (trigger.kind !== "submits_to") continue;
+    const page = nodeById.get(trigger.pageId);
+    for (const field of page?.data?.fields ?? []) {
+      const name = String(field);
+      if (seen.has(name)) continue;
+      seen.add(name);
+      inputs.push(name);
+    }
+  }
+  return inputs;
+}
+
+function useCaseStatements(traversal) {
+  const statements = [];
+  for (const node of traversal.nodes) {
+    if (node.type !== "statement") continue;
+    statements.push({
+      id: node.name,
+      operation: typeof node.data?.type === "string" ? node.data.type : "",
+    });
+  }
+  return statements.sort((left, right) => compareText(left.id, right.id));
+}
+
+function buildUseCase(graph, route, nodeById, incomingByTarget, outgoingBySource) {
   const triggers = [];
   for (const edge of incomingByTarget.get(route.id) ?? []) {
     if (!TRIGGER_EDGE_TYPES.has(edge.type)) continue;
@@ -62,8 +123,10 @@ function buildUseCase(graph, route, nodeById, incomingByTarget) {
     if (!source || source.type !== "page") continue;
     triggers.push({
       kind: edge.type,
+      pageId: source.id,
       pagePath: source.filePath ?? source.name,
       pageName: source.name,
+      confidence: typeof edge.confidence === "number" ? edge.confidence : 1,
       evidence: firstEvidence(edge),
     });
   }
@@ -115,12 +178,33 @@ function buildUseCase(graph, route, nodeById, incomingByTarget) {
     routeId: route.id,
     module: moduleNameForRoute(route.name),
     evidence: firstEvidence(route),
+    request: requestSummary(route),
     triggers: triggers.slice(0, MAX_TRIGGERS_PER_USE_CASE),
+    inputs: useCaseInputs(triggers, nodeById),
+    outcomes: useCaseOutcomes(route, nodeById, outgoingBySource),
     mainFlow,
     flowTruncated: traversal.truncated || mainPath.nodes.length > MAX_FLOW_STEPS,
+    statements: useCaseStatements(traversal),
     tables,
     minConfidence,
   };
+}
+
+function pageFieldSpecs(page, actions, nodeById) {
+  const defaults = new Map();
+  for (const action of actions) {
+    if (action.kind !== "submits_to") continue;
+    const route = nodeById.get(action.targetId);
+    for (const hint of route?.data?.requestHints ?? []) {
+      for (const [name, value] of Object.entries(hint?.parameters ?? {})) {
+        if (typeof value === "string" && value && !defaults.has(name)) defaults.set(name, value);
+      }
+    }
+  }
+  return (Array.isArray(page.data?.fields) ? page.data.fields : []).map((field) => {
+    const name = String(field);
+    return { name, defaultValue: defaults.get(name) ?? "" };
+  });
 }
 
 function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget) {
@@ -129,9 +213,12 @@ function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget) {
     if (!PAGE_ACTION_EDGE_TYPES.has(edge.type)) continue;
     const target = nodeById.get(edge.target);
     if (!target) continue;
+    const methods = requestSummary(target).methods;
     actions.push({
       kind: edge.type,
       target: target.name,
+      targetId: target.id,
+      method: edge.type === "submits_to" && methods.length > 0 ? methods.join("/") : "",
       evidence: firstEvidence(edge),
     });
   }
@@ -155,7 +242,7 @@ function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget) {
     filePath: page.filePath ?? page.name,
     name: page.name,
     visibleText: String(page.data?.visibleText ?? ""),
-    fields: Array.isArray(page.data?.fields) ? page.data.fields.map(String) : [],
+    fields: pageFieldSpecs(page, actions, nodeById),
     actions: actions.slice(0, MAX_ACTIONS_PER_PAGE),
     arrivals: arrivals.slice(0, MAX_ARRIVALS_PER_PAGE),
   };
@@ -237,7 +324,7 @@ export function buildDocumentModel(graph, options = {}) {
   const truncatedUseCases = routes.length > MAX_USE_CASES;
   let useCases = routes
     .slice(0, MAX_USE_CASES)
-    .map((route) => buildUseCase(graph, route, nodeById, incomingByTarget));
+    .map((route) => buildUseCase(graph, route, nodeById, incomingByTarget, outgoingBySource));
 
   const pageNodes = graph.nodes
     .filter((node) => node.type === "page")

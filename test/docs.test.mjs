@@ -43,6 +43,28 @@ test("document model derives modules, use cases, and page specs from the graph",
     audit.triggers.some((trigger) => trigger.kind === "submits_to" && trigger.pagePath === "web/order/audit.jsp"),
     "the audit form submission must be a trigger",
   );
+  assert.ok(
+    audit.triggers.every((trigger) => typeof trigger.confidence === "number"),
+    "triggers must carry the edge confidence",
+  );
+  assert.deepEqual(audit.request.methods, ["POST"], "request methods must come from route requestHints");
+  assert.ok(
+    audit.request.parameters.includes("orderId") && audit.request.parameters.includes("method"),
+    "request parameters must list submitted form parameters",
+  );
+  assert.ok(
+    audit.outcomes.some((outcome) => outcome.reason.includes("success") && outcome.target.endsWith("auditSuccess.jsp")),
+    "Struts success forward must become an outcome",
+  );
+  assert.ok(
+    audit.outcomes.some((outcome) => outcome.reason.includes("error") && outcome.target.endsWith("audit.jsp")),
+    "Struts error forward must become an alternate outcome",
+  );
+  assert.deepEqual(audit.inputs, ["orderId", "method", "decision"], "inputs must come from trigger page fields");
+  assert.ok(
+    audit.statements.some((statement) => statement.id === "order.insertAuditLog" && statement.operation === "insert"),
+    "statements must carry the SQL operation type",
+  );
   const flowNodeIds = audit.mainFlow.map((step) => step.nodeId);
   assert.ok(flowNodeIds.includes("statement:order.insertAuditLog"), "main flow must reach the iBATIS statement");
   assert.ok(flowNodeIds.includes("table:dbo.t_order_audit_log"), "main flow must reach the audit log table");
@@ -59,11 +81,19 @@ test("document model derives modules, use cases, and page specs from the graph",
 
   const auditPage = model.pages.find((page) => page.filePath === "web/order/audit.jsp");
   assert.ok(auditPage, "audit.jsp must become a page spec");
-  assert.deepEqual(auditPage.fields, ["orderId", "method", "decision"]);
+  assert.deepEqual(
+    auditPage.fields.map((field) => field.name),
+    ["orderId", "method", "decision"],
+  );
+  assert.equal(
+    auditPage.fields.find((field) => field.name === "method")?.defaultValue,
+    "audit",
+    "field defaults must come from the submitted route requestHints",
+  );
   assert.ok(auditPage.visibleText.includes("订单审核"));
   assert.ok(
-    auditPage.actions.some((action) => action.kind === "submits_to" && action.target === "/order/audit.do"),
-    "page actions must include the form submission",
+    auditPage.actions.some((action) => action.kind === "submits_to" && action.target === "/order/audit.do" && action.method === "POST"),
+    "page actions must include the form submission with its HTTP method",
   );
   assert.ok(
     auditPage.actions.some((action) => action.kind === "links_to" && action.target === "/order/list.do"),

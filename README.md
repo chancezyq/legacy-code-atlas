@@ -125,9 +125,9 @@ node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"
 它在项目内确定性地生成三份 Markdown 文档：
 
 ```text
-.legacy-code-atlas/docs/use-cases.md   用例规格（UCS）：按模块分组，含入口、主流程、读写表和 file:line 引用
-.legacy-code-atlas/docs/ui-spec.md     界面规格（UIS）：每个 JSP 页面的可见文本、表单字段、页面动作和到达方式
-.legacy-code-atlas/docs/diagrams.md    系统图：Mermaid 模块总览 flowchart 和用例时序图，GitHub/GitLab 可直接渲染
+.legacy-code-atlas/docs/use-cases.md   用例规格（UCS）：按模块分组，含入口、请求方法与参数、输入字段、主流程、结果（forward/redirect）、SQL statement、读写表、每模块数据访问矩阵和 file:line 引用
+.legacy-code-atlas/docs/ui-spec.md     界面规格（UIS）：每个 JSP 页面的可见文本、含默认值的表单字段表、带 HTTP 方法的页面动作和到达方式
+.legacy-code-atlas/docs/diagrams.md    系统图：Mermaid 页面导航图、带图例的模块总览 flowchart（虚线为启发式关系）和用例时序图，GitHub/GitLab 可直接渲染
 ```
 
 所有内容都从索引事实推导并附项目相对引用，不经过模型改写；主流程置信度低于 `0.95` 时会标注含启发式关系需人工复核（文档正文为英文，便于在英文代码库团队中分享）。文档规模有硬上限（每份 1 MiB、用例/页面各 200 个、图各 30/20 个），超出会显式标注截断。这些文档包含源码结构、路径和 SQL，请与索引一样按公司敏感数据管理，只通过公司批准的渠道分享。

@@ -80,12 +80,38 @@ const ACCESS_LABELS = new Map([
   ["write", "write"],
   ["read-write", "read-write"],
 ]);
+const OUTCOME_LABELS = new Map([
+  ["forwards_to", "forwards to"],
+  ["redirects_to", "redirects to"],
+]);
 const ARRIVAL_LABELS = new Map([
   ["forwards_to", "forward"],
   ["redirects_to", "redirect"],
   ["includes", "include"],
   ["uses_tile", "Tiles composition"],
 ]);
+
+function tableCell(value) {
+  return renderInlineText(value).replaceAll("|", "\\|").replaceAll("\n", " ");
+}
+
+function crudMatrix(module, writer) {
+  const tables = new Map();
+  for (const useCase of module.useCases) {
+    for (const table of useCase.tables) {
+      const row = tables.get(table.name) ?? new Map();
+      row.set(useCase.route, table.access);
+      tables.set(table.name, row);
+    }
+  }
+  if (tables.size === 0) return;
+  writer.lines("", "#### Data access matrix", "", "| Table | Use case | Access |", "| --- | --- | --- |");
+  for (const [tableName, row] of [...tables.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))) {
+    for (const [route, access] of [...row.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))) {
+      writer.line(`| ${tableCell(tableName)} | ${tableCell(route)} | ${ACCESS_LABELS.get(access) ?? access} |`);
+    }
+  }
+}
 
 function scopeLine(model) {
   if (!model.scope) return null;
@@ -117,6 +143,9 @@ export function renderUseCases(model) {
         `- Source: ${source || "no direct evidence"}`,
         `- ${confidenceNote(useCase)}`,
       );
+      if (useCase.request.methods.length > 0) {
+        writer.line(`- Request: ${useCase.request.methods.join("/")}${useCase.request.parameters.length > 0 ? `, parameters ${useCase.request.parameters.map((name) => `\`${renderInlineText(name)}\``).join(", ")}` : ""}`);
+      }
       if (useCase.triggers.length > 0) {
         writer.line("- Triggers:");
         for (const trigger of useCase.triggers) {
@@ -127,6 +156,9 @@ export function renderUseCases(model) {
       } else {
         writer.line("- Triggers: no page entry found (possibly triggered by an external system or an unresolved dynamic call)");
       }
+      if (useCase.inputs.length > 0) {
+        writer.line(`- Inputs: ${useCase.inputs.map((name) => `\`${renderInlineText(name)}\``).join(", ")}`);
+      }
       writer.line("- Main flow:");
       for (const step of useCase.mainFlow) {
         const via = step.via ? ` (via ${renderInlineText(step.via)})` : "";
@@ -134,6 +166,17 @@ export function renderUseCases(model) {
         writer.line(`  ${step.index}. ${renderInlineText(step.nodeType)} ${renderInlineText(step.name)}${via}${ref ? `, evidence ${ref}` : ""}`);
       }
       if (useCase.flowTruncated) writer.line("  - (main flow exceeds the display limit and was truncated)");
+      if (useCase.outcomes.length > 0) {
+        writer.line("- Outcomes:");
+        for (const outcome of useCase.outcomes) {
+          const kind = OUTCOME_LABELS.get(outcome.kind) ?? outcome.kind;
+          const ref = citation(outcome.evidence);
+          writer.line(`  - ${renderInlineText(outcome.reason || "result")}: ${kind} ${renderInlineText(outcome.target)}${ref ? ` (${ref})` : ""}`);
+        }
+      }
+      if (useCase.statements.length > 0) {
+        writer.line(`- SQL statements: ${useCase.statements.map((statement) => `\`${renderInlineText(statement.id)}\`${statement.operation ? ` (${renderInlineText(statement.operation)})` : ""}`).join(", ")}`);
+      }
       if (useCase.tables.length > 0) {
         writer.line("- Tables:");
         for (const table of useCase.tables) {
@@ -144,6 +187,8 @@ export function renderUseCases(model) {
       }
       writer.line("");
     }
+    crudMatrix(module, writer);
+    writer.line("");
   }
   return writer.finish();
 }
@@ -164,7 +209,11 @@ export function renderUiSpec(model) {
     writer.lines("", `## Page ${renderInlineText(page.filePath)}`, "");
     if (page.visibleText) writer.line(`- Visible text: ${renderInlineText(page.visibleText)}`);
     if (page.fields.length > 0) {
-      writer.line(`- Form fields: ${page.fields.map((field) => `\`${renderInlineText(field)}\``).join(", ")}`);
+      writer.lines("- Form fields:", "", "  | Field | Default value |", "  | --- | --- |");
+      for (const field of page.fields) {
+        writer.line(`  | \`${tableCell(field.name)}\` | ${field.defaultValue ? `\`${tableCell(field.defaultValue)}\`` : ""} |`);
+      }
+      writer.line("");
     } else {
       writer.line("- Form fields: none");
     }
@@ -172,8 +221,9 @@ export function renderUiSpec(model) {
       writer.line("- Page actions:");
       for (const action of page.actions) {
         const kind = TRIGGER_LABELS.get(action.kind) ?? action.kind;
+        const method = action.method ? ` [${renderInlineText(action.method)}]` : "";
         const ref = citation(action.evidence);
-        writer.line(`  - ${kind} -> ${renderInlineText(action.target)}${ref ? ` (${ref})` : ""}`);
+        writer.line(`  - ${kind}${method} -> ${renderInlineText(action.target)}${ref ? ` (${ref})` : ""}`);
       }
     } else {
       writer.line("- Page actions: none");
@@ -193,6 +243,7 @@ function moduleFlowchart(module, writer) {
   const nodeIds = new Map();
   const lines = [];
   const edges = new Set();
+  let hasHeuristicEdge = false;
   const idFor = (key, label, shapeOpen, shapeClose) => {
     let id = nodeIds.get(key);
     if (!id) {
@@ -206,7 +257,9 @@ function moduleFlowchart(module, writer) {
     const routeId = idFor(`route:${useCase.route}`, useCase.route, "([", "])");
     for (const trigger of useCase.triggers) {
       const pageId = idFor(`page:${trigger.pagePath}`, trigger.pagePath, "[", "]");
-      edges.add(`  ${pageId} -->|${mermaidLabel(trigger.kind)}| ${routeId}`);
+      const heuristic = trigger.confidence < 0.95;
+      hasHeuristicEdge ||= heuristic;
+      edges.add(`  ${pageId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(trigger.kind)}| ${routeId}`);
     }
     for (const table of useCase.tables) {
       const tableId = idFor(`table:${table.name}`, table.name, "[(", ")]");
@@ -214,7 +267,15 @@ function moduleFlowchart(module, writer) {
     }
   }
   if (nodeIds.size === 0) return;
-  writer.lines("", `## Module overview: ${renderInlineText(module.name)}`, "", "```mermaid", "flowchart LR");
+  writer.lines(
+    "",
+    `## Module overview: ${renderInlineText(module.name)}`,
+    "",
+    `Legend: rectangles are pages, rounded nodes are routes, cylinders are tables${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}.`,
+    "",
+    "```mermaid",
+    "flowchart LR",
+  );
   for (const line of lines) writer.line(line);
   for (const edge of [...edges].sort().slice(0, MAX_DIAGRAM_EDGES)) writer.line(edge);
   writer.lines("```");
@@ -236,6 +297,44 @@ function sequenceDiagram(useCase, writer) {
   writer.lines("```");
 }
 
+function navigationDiagram(model, writer) {
+  const nodeIds = new Map();
+  const lines = [];
+  const edges = new Set();
+  const idFor = (key, label, shapeOpen = "[", shapeClose = "]") => {
+    let id = nodeIds.get(key);
+    if (!id) {
+      id = `s${nodeIds.size}`;
+      nodeIds.set(key, id);
+      lines.push(`  ${id}${shapeOpen}${mermaidLabel(label)}${shapeClose}`);
+    }
+    return id;
+  };
+  for (const useCase of model.useCases) {
+    if (useCase.triggers.length === 0 && useCase.outcomes.length === 0) continue;
+    const routeId = idFor(`route:${useCase.route}`, useCase.route, "([", "])");
+    for (const trigger of useCase.triggers) {
+      edges.add(`  ${idFor(`page:${trigger.pageName}`, trigger.pageName)} -->|${mermaidLabel(trigger.kind)}| ${routeId}`);
+    }
+    for (const outcome of useCase.outcomes) {
+      edges.add(`  ${routeId} -->|${mermaidLabel(outcome.reason || outcome.kind)}| ${idFor(`page:${outcome.target}`, outcome.target)}`);
+    }
+  }
+  if (edges.size === 0) return;
+  writer.lines(
+    "",
+    "## Screen navigation",
+    "",
+    "Legend: rectangles are pages, rounded nodes are routes; edge labels are the navigation trigger or the forward/redirect result.",
+    "",
+    "```mermaid",
+    "flowchart LR",
+  );
+  for (const line of lines) writer.line(line);
+  for (const edge of [...edges].sort().slice(0, MAX_DIAGRAM_EDGES)) writer.line(edge);
+  writer.lines("```");
+}
+
 export function renderDiagrams(model) {
   const writer = createWriter();
   writer.lines(
@@ -246,6 +345,8 @@ export function renderDiagrams(model) {
   const scope = scopeLine(model);
   if (scope) writer.line(scope);
   if (model.truncated) writer.lines("", MODEL_TRUNCATION_NOTICE);
+
+  navigationDiagram(model, writer);
 
   const modules = model.modules.slice(0, MAX_MODULE_DIAGRAMS);
   if (model.modules.length > modules.length) writer.lines("", MODEL_TRUNCATION_NOTICE);
