@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { lstat, open, realpath, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { analyzeProjectDetailed } from "../src/analyzer.mjs";
@@ -17,7 +17,7 @@ import { buildDocumentModel, scopeSlug } from "../src/doc-model.mjs";
 import { renderDiagrams, renderUiSpec, renderUseCases } from "../src/doc-render.mjs";
 import { renderInlineText, renderTraceMarkdown } from "../src/render.mjs";
 import { inspectOpenCodeCompatibility, renderOpenCodeDoctor } from "../src/opencode-doctor.mjs";
-import { replaceUnsafeTextControls } from "../src/text-safety.mjs";
+import { containsUnsafeTextControl, replaceUnsafeTextControls } from "../src/text-safety.mjs";
 
 const HELP = `Legacy Code Atlas
 
@@ -90,10 +90,11 @@ function parseArguments(argv) {
 async function writeIndex(graph, outputPath) {
   validateGraphIndex(graph);
   const serialized = serializeGraph(graph);
-  const bytes = Buffer.from(serialized);
-  if (bytes.length > MAX_GRAPH_INDEX_BYTES) {
+  const serializedBytes = Buffer.byteLength(serialized);
+  if (serializedBytes > MAX_GRAPH_INDEX_BYTES) {
     throw new Error("项目索引不能超过 512 MiB");
   }
+  const bytes = Buffer.from(serialized);
   await writeFileAtomic(outputPath, bytes);
   return serialized;
 }
@@ -206,9 +207,9 @@ function isStandardIndexPath(filePath) {
     && samePathName(path.basename(path.dirname(filePath)), ATLAS_DIRECTORY_NAME);
 }
 
-function validateLogicalQuery(query) {
-  if (query.includes("\0")) throw new Error("问题内容不能包含 NUL");
-  if (/[\u0001-\u001f\u007f-\u009f]/u.test(query)) throw new Error("问题内容不能包含控制字符");
+function validateLogicalQuery(query, rawQuery = query) {
+  if (rawQuery.includes("\0")) throw new Error("问题内容不能包含 NUL");
+  if (containsUnsafeTextControl(rawQuery)) throw new Error("问题内容不能包含控制字符");
   if (Array.from(query).length > MAX_QUERY_CHARACTERS) {
     throw new Error(`问题内容不能超过 ${MAX_QUERY_CHARACTERS} 个字符`);
   }
@@ -261,6 +262,29 @@ async function inspectStandardIndex(projectRoot, { allowMissing = false } = {}) 
   }
   if (hasMultipleLinks(entry)) throw new Error("项目索引必须只有一个链接，不能使用硬链接");
   return indexPath;
+}
+
+async function ensureRealAtlasSubdirectories(atlasDirectory, segments) {
+  let current = atlasDirectory;
+  let canonicalParent = await realpath(atlasDirectory);
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    try {
+      await mkdir(current);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    const entry = await lstat(current);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error(`文档输出目录 ${segment} 必须是真实目录，不能是符号链接或 junction`);
+    }
+    const canonicalCurrent = await realpath(current);
+    if (!samePathName(canonicalCurrent, path.join(canonicalParent, segment))) {
+      throw new Error(`文档输出目录 ${segment} 必须是真实目录，不能是符号链接或 junction`);
+    }
+    canonicalParent = canonicalCurrent;
+  }
+  return current;
 }
 
 async function prepareQueryFile(projectRoot) {
@@ -348,9 +372,10 @@ async function readQueryFile(queryFile, projectRoot) {
     throw new Error("问题文件必须是有效的 UTF-8");
   }
   if (query.includes("\0")) throw new Error("问题文件不能包含 NUL");
-  query = query.trim();
-  if (!query) throw new Error("问题文件不能为空");
-  return query;
+  const logicalQuery = query.trim();
+  if (!logicalQuery) throw new Error("问题文件不能为空");
+  if (containsUnsafeTextControl(query)) throw new Error("问题内容不能包含控制字符");
+  return logicalQuery;
 }
 
 function renderOverview(graph) {
@@ -391,7 +416,8 @@ async function main() {
   }
   if (!input) throw new Error(`命令 ${command} 缺少项目或索引路径`);
 
-  const positionalQuery = queryParts.join(" ").trim();
+  const rawPositionalQuery = queryParts.join(" ");
+  const positionalQuery = rawPositionalQuery.trim();
   if (queryFile !== null && queryParts.length > 0) {
     throw new Error("不能同时使用查询参数和 --query-file");
   }
@@ -461,9 +487,11 @@ async function main() {
     }
     const graph = await loadGraph(project);
     const model = buildDocumentModel(graph, scopeQuery === undefined ? {} : { scopeQuery });
-    const docsDir = scopeQuery === undefined
-      ? path.join(project, ATLAS_DIRECTORY_NAME, "docs")
-      : path.join(project, ATLAS_DIRECTORY_NAME, "docs", "scoped", scopeSlug(scopeQuery));
+    const indexPath = await inspectStandardIndex(project);
+    const docsDir = await ensureRealAtlasSubdirectories(
+      path.dirname(indexPath),
+      scopeQuery === undefined ? ["docs"] : ["docs", "scoped", scopeSlug(scopeQuery)],
+    );
     const documents = [
       ["use-cases.md", renderUseCases(model)],
       ["ui-spec.md", renderUiSpec(model)],
@@ -500,7 +528,7 @@ async function main() {
     : await readQueryFile(queryFile, await projectRootForQuery(input));
   if (command !== "overview") {
     if (!query) throw new Error(`命令 ${command} 缺少查询内容`);
-    validateLogicalQuery(query);
+    validateLogicalQuery(query, queryFile === null ? rawPositionalQuery : query);
   }
   const graph = await loadGraph(input);
   if (command === "overview") {

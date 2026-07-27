@@ -197,6 +197,81 @@ test("graph retains the first edge object when a duplicate edge id is added", ()
   assert.deepEqual(first.data, { method: "POST" });
 });
 
+test("graph merges edge evidence only when explicitly requested", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const source = graph.addNode({ type: "page", key: "orders.jsp", name: "orders.jsp" });
+  const target = graph.addNode({ type: "route", key: "/orders", name: "/orders" });
+  const firstEvidence = createEvidence("web/orders.jsp", 2, 3, "first form");
+  const secondEvidence = { file: "web\\orders.jsp", line: 8, column: 3, snippet: "second form" };
+  const edge = graph.addEdge({
+    source: source.id,
+    target: target.id,
+    type: "submits_to",
+    confidence: 1,
+    reason: "form request",
+    evidence: [firstEvidence],
+  });
+
+  assert.equal(graph.addEdgeEvidence(edge, [secondEvidence, secondEvidence]), edge);
+  assert.deepEqual(graph.toJSON().edges[0].evidence, [
+    firstEvidence,
+    { ...secondEvidence, file: "web/orders.jsp" },
+  ]);
+});
+
+test("graph refreshes edge evidence keys after a retained entry is mutated", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const source = graph.addNode({ type: "page", key: "orders.jsp" });
+  const target = graph.addNode({ type: "route", key: "/orders" });
+  const original = createEvidence("web/orders.jsp", 2, 3, "original");
+  const edge = graph.addEdge({
+    source: source.id,
+    target: target.id,
+    type: "submits_to",
+    confidence: 1,
+    reason: "form request",
+    evidence: [original],
+  });
+  const retained = edge.evidence[0];
+
+  graph.addEdgeEvidence(edge, []);
+  retained.snippet = "mutated";
+  graph.addEdgeEvidence(edge, [original]);
+
+  assert.deepEqual(edge.evidence.map(({ snippet }) => snippet), ["mutated", "original"]);
+});
+
+test("repeated edge evidence additions do not rescan historical evidence", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const source = graph.addNode({ type: "page", key: "orders.jsp", name: "orders.jsp" });
+  const target = graph.addNode({ type: "route", key: "/orders", name: "/orders" });
+  const edge = graph.addEdge({
+    source: source.id,
+    target: target.id,
+    type: "submits_to",
+    confidence: 1,
+    reason: "form request",
+  });
+  let keyCalculations = 0;
+  const evidence = (index) => ({
+    file: "web/orders.jsp",
+    line: index + 1,
+    column: 1,
+    snippet: `form ${index}`,
+    toJSON() {
+      keyCalculations += 1;
+      return { file: this.file, line: this.line, column: this.column, snippet: this.snippet };
+    },
+  });
+
+  for (let index = 0; index < 1_000; index += 1) {
+    graph.addEdgeEvidence(edge, [evidence(index)]);
+  }
+
+  assert.equal(edge.evidence.length, 1_000);
+  assert.ok(keyCalculations <= 1_001, `expected linear evidence key work, observed ${keyCalculations}`);
+});
+
 test("graph deterministically adds unique node data items in first-seen order", () => {
   const graph = new GraphBuilder({ projectRoot: "/repo" });
   const route = graph.addNode({ type: "route", key: "/orders", name: "/orders" });

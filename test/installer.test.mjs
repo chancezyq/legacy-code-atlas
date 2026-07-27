@@ -45,7 +45,7 @@ test("Skill-only v3 never ships or publishes an OpenCode TypeScript tool", async
   assert.doesNotMatch(installer, /\$ToolSource\b|integrations[\\/]opencode[\\/]tools[\\/]legacy_atlas[.]ts/);
 });
 
-test("v1 and v2 tools are retired through journal v2 instead of being replaced", async () => {
+test("v1 and v2 tools are retired through journal v3 while journal v2 remains recoverable", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const loadTransaction = topLevelFunction(installer, "Get-InstallTransaction");
   const writeJournal = topLevelFunction(installer, "Write-TransactionJournal");
@@ -54,11 +54,14 @@ test("v1 and v2 tools are retired through journal v2 instead of being replaced",
   const commit = topLevelFunction(installer, "Commit-InstallTransaction");
   const rollback = topLevelFunction(installer, "Rollback-InstallTransaction");
 
-  assert.match(loadTransaction, /legacy-code-atlas-transaction-v2/);
+  assert.match(installer, /\$PreviousTransactionOwnerValue\s*=\s*["']legacy-code-atlas-transaction-v2["']/);
+  assert.match(installer, /\$TransactionOwnerValue\s*=\s*["']legacy-code-atlas-transaction-v3["']/);
+  assert.match(loadTransaction, /\$PreviousTransactionOwnerValue/);
+  assert.match(loadTransaction, /\$TransactionOwnerValue/);
   assert.match(loadTransaction, /upgrade-v1/);
   assert.match(loadTransaction, /upgrade-v2/);
   assert.match(loadTransaction, /update-v3/);
-  assert.match(writeJournal, /version\s*=\s*2/);
+  assert.match(writeJournal, /version\s*=\s*3/);
   assert.match(writeJournal, /legacyToolSha256/);
   assert.match(writeJournal, /legacyToolBackup/);
   assert.doesNotMatch(writeJournal, /(?:^|[^A-Za-z])toolTemp\b|(?:^|[^A-Za-z])toolSha256\s*=/im);
@@ -78,7 +81,7 @@ test("v1 and v2 tools are retired through journal v2 instead of being replaced",
   ]);
 });
 
-test("uninstall removes only an empty owned atlas Skill directory so reinstall can proceed", async () => {
+test("uninstall removes only the empty directory of the exact owned Skill", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const uninstallStart = installer.indexOf("if ($Uninstall)");
   const installStart = installer.indexOf("$nodeCommand = Get-Command node", uninstallStart);
@@ -88,12 +91,18 @@ test("uninstall removes only an empty owned atlas Skill directory so reinstall c
   assertOrdered(uninstall, [
     'if ($entry.Kind -ceq "agent-skill")',
     "Remove-Item -LiteralPath $entry.Path -Force",
-    "Get-PathEntryWithoutFollowingTarget $SkillDir",
-    "Get-ChildItem -LiteralPath $SkillDir -Force",
-    "Remove-Item -LiteralPath $SkillDir -Force",
+    "Split-Path -Parent $entry.Path",
+    "Get-PathEntryWithoutFollowingTarget $ownedSkillDirectory",
+    "Get-ChildItem -LiteralPath $ownedSkillDirectory -Force",
+    "Remove-Item -LiteralPath $ownedSkillDirectory -Force",
   ]);
   assert.match(uninstall, /PSIsContainer/);
   assert.match(uninstall, /ReparsePoint/);
+  assert.doesNotMatch(
+    uninstall,
+    /^\s*Assert-TargetPathsSafe\s*$/m,
+    "uninstall must not validate the unowned current atlas namespace",
+  );
   assert.doesNotMatch(uninstall, /Remove-Item[^\r\n]+\$SkillDir[^\r\n]+-Recurse/);
 });
 
@@ -253,6 +262,35 @@ test("installer blocks but never deletes unowned stale or duplicate OpenCode fil
   assert.doesNotMatch(collisionGuard, /Remove-Item/);
 });
 
+test("preflight blocks an orphaned pre-rename Atlas Skill without claiming unrelated understand content", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const collisionGuard = topLevelFunction(installer, "Assert-NoUnownedLegacyIntegrationFiles");
+
+  assert.match(
+    collisionGuard,
+    /Get-PathEntryWithoutFollowingTarget\s+\$LegacySkillTarget/,
+  );
+  assert.match(
+    collisionGuard,
+    /Test-ManifestOwnsExternalPath[\s\S]*?-Kind\s+["']agent-skill["'][\s\S]*?-Path\s+\$LegacySkillTarget/,
+  );
+  assert.match(
+    collisionGuard,
+    /Get-Content\s+-LiteralPath\s+\$LegacySkillTarget[\s\S]*?-Encoding\s+Byte[\s\S]*?-TotalCount\s+1048576[\s\S]*?-ReadCount\s+0/,
+  );
+  assert.match(
+    collisionGuard,
+    /\[Text[.]Encoding\]::UTF8[.]GetString\(\$legacySkillBytes\)/,
+  );
+  assert.match(collisionGuard, /[.]legacy-code-atlas\/bin\/legacy-code-atlas[.]mjs/);
+  assert.match(collisionGuard, /legacy_atlas_/);
+  assert.match(
+    collisionGuard,
+    /if\s*\(\$hasLegacyAtlasSignature\)\s*\{[\s\S]*?Get-ContentHash\s+\$LegacySkillTarget[\s\S]*?无有效 ownership manifest[\s\S]*?保留文件并停止/,
+  );
+  assert.doesNotMatch(collisionGuard, /Remove-Item/);
+});
+
 test("Windows installer validates v1/v2 manifests and writes a one-file v3 manifest", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const initialize = topLevelFunction(installer, "Initialize-InstallTransactionManifest");
@@ -282,6 +320,90 @@ test("Windows installer validates v1/v2 manifests and writes a one-file v3 manif
   assert.match(installer, /toolHash/);
   assert.match(installer, /ConvertTo-Json\s+-Depth\s+4/);
   assert.doesNotMatch(installer, /Set-Content[^\r\n]+\$OwnerMarker|\$manifest[^\r\n]+\|\s*Set-Content/);
+});
+
+test("pre-rename v2 and v3 understand Skills migrate through the recoverable transaction", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const loadManifest = topLevelFunction(installer, "Get-InstallManifest");
+  const transactionPaths = topLevelFunction(installer, "Get-TransactionPaths");
+  const loadTransaction = topLevelFunction(installer, "Get-InstallTransaction");
+  const writeJournal = topLevelFunction(installer, "Write-TransactionJournal");
+  const backupLegacySkill = topLevelFunction(installer, "Backup-LegacySkill");
+  const preflight = topLevelFunction(installer, "Assert-InstallTransactionPreflight");
+  const commit = topLevelFunction(installer, "Commit-InstallTransaction");
+  const rollback = topLevelFunction(installer, "Rollback-InstallTransaction");
+
+  assert.match(installer, /\$LegacySkillDir\s*=\s*Join-Path\s+\$HOME\s+["']\.agents\\skills\\understand["']/);
+  assert.match(installer, /\$LegacySkillTarget\s*=\s*Join-Path\s+\$LegacySkillDir\s+["']SKILL[.]md["']/);
+  assert.match(loadManifest, /Test-SamePath\s+\$path\s+\$LegacySkillTarget/);
+  assert.match(loadManifest, /Test-SamePath\s+\$path\s+\$SkillTarget/);
+  assert.match(transactionPaths, /LegacySkillBackup/);
+  assert.match(installer, /legacy-code-atlas-transaction-v2/);
+  assert.match(installer, /legacy-code-atlas-transaction-v3/);
+  assert.match(writeJournal, /version\s*=\s*3/);
+  assert.match(writeJournal, /legacySkillSha256/);
+  assert.match(writeJournal, /legacySkillExisted/);
+  assert.match(writeJournal, /legacySkillBackup/);
+  assertOrdered(backupLegacySkill, [
+    "Get-PathEntryWithoutFollowingTarget $Transaction.LegacySkillTarget",
+    "Get-ContentHash $Transaction.LegacySkillTarget",
+    "Move-Item -LiteralPath $Transaction.LegacySkillTarget -Destination $Transaction.LegacySkillBackup",
+  ]);
+  assert.match(backupLegacySkill, /\$Transaction[.]LegacySkillSha256/);
+  assert.match(preflight, /Test-ManifestOwnsExternalPath[\s\S]*-Kind\s+["']agent-skill["'][\s\S]*-Path\s+\$SkillTarget/);
+  assertOrdered(commit, ["Replace-SkillFile", "Backup-LegacySkill", "Commit-ManifestFile"]);
+  assertOrdered(rollback, [
+    "Restore-LegacyOwnedFile",
+    "-Target $Transaction.LegacySkillTarget",
+    "-Backup $Transaction.LegacySkillBackup",
+  ]);
+});
+
+test("transaction-v1 and transaction-v2 recovery recognize only the two released Skill namespaces", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const legacyPaths = topLevelFunction(installer, "Get-LegacyTransactionPaths");
+  const loadLegacy = topLevelFunction(installer, "Get-LegacyInstallTransaction");
+  const transactionPaths = topLevelFunction(installer, "Get-TransactionPaths");
+  const loadTransaction = topLevelFunction(installer, "Get-InstallTransaction");
+  const legacySafety = topLevelFunction(installer, "Assert-LegacyTransactionPathsSafe");
+  const transactionSafety = topLevelFunction(installer, "Assert-TransactionPathsSafe");
+  const legacyRollback = topLevelFunction(installer, "Rollback-LegacyInstallTransaction");
+  const rollback = topLevelFunction(installer, "Rollback-InstallTransaction");
+
+  for (const pathBuilder of [legacyPaths, transactionPaths]) {
+    assert.match(pathBuilder, /\[string\]\$SkillDirectory/);
+    assert.match(pathBuilder, /\[string\]\$SkillFile/);
+    assert.match(pathBuilder, /SkillDir\s*=\s*Get-CanonicalPath\s+\$SkillDirectory/);
+    assert.match(pathBuilder, /SkillTarget\s*=\s*Get-CanonicalPath\s+\$SkillFile/);
+  }
+  for (const loader of [loadLegacy, loadTransaction]) {
+    assert.match(loader, /-SkillDirectory\s+\$SkillDir/);
+    assert.match(loader, /-SkillFile\s+\$SkillTarget/);
+    assert.match(loader, /-SkillDirectory\s+\$LegacySkillDir/);
+    assert.match(loader, /-SkillFile\s+\$LegacySkillTarget/);
+    assert.match(loader, /包含任意或非推导路径/);
+    assert.match(loader, /SkillDir\s*=\s*\$paths[.]SkillDir/);
+    assert.match(loader, /SkillTarget\s*=\s*\$paths[.]SkillTarget/);
+  }
+  assert.match(legacySafety, /\$Transaction[.]SkillTarget/);
+  assert.match(transactionSafety, /\$Transaction[.]SkillTarget/);
+  assert.match(legacyRollback, /-Target\s+\$Transaction[.]SkillTarget/);
+  assert.match(rollback, /-Target\s+\$Transaction[.]SkillTarget/);
+  assert.match(legacyRollback, /Get-PathEntryWithoutFollowingTarget\s+\$Transaction[.]SkillDir/);
+  assert.match(rollback, /Get-PathEntryWithoutFollowingTarget\s+\$Transaction[.]SkillDir/);
+});
+
+test("uninstall cleans the exact owned Skill namespace instead of assuming atlas", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const uninstallStart = installer.indexOf("if ($Uninstall)");
+  const installStart = installer.indexOf("$nodeCommand = Get-Command node", uninstallStart);
+  assert.ok(uninstallStart >= 0 && installStart > uninstallStart, "missing uninstall block");
+  const uninstall = installer.slice(uninstallStart, installStart);
+
+  assert.match(uninstall, /Split-Path\s+-Parent\s+\$entry[.]Path/);
+  assert.match(uninstall, /Get-PathEntryWithoutFollowingTarget\s+\$ownedSkillDirectory/);
+  assert.match(uninstall, /Get-ChildItem\s+-LiteralPath\s+\$ownedSkillDirectory\s+-Force/);
+  assert.match(uninstall, /Remove-Item\s+-LiteralPath\s+\$ownedSkillDirectory\s+-Force/);
 });
 
 test("install manifest owner and version validation is type- and case-strict", async () => {
@@ -327,7 +449,8 @@ test("transaction version accepts only exact integral CLR values without narrowi
   }
   assert.match(integerCheck, /-notcontains/);
   assert.match(integerCheck, /\[decimal\]\$Value\s*-eq\s*\[decimal\]\$Expected/);
-  assert.match(loadTransaction, /Test-ExactIntegerValue[^\r\n]+\$transaction\.version[^\r\n]+2/);
+  assert.match(loadTransaction, /Test-ExactIntegerValue[^\r\n]+\$versionProperty\.Value[^\r\n]+2/);
+  assert.match(loadTransaction, /Test-ExactIntegerValue[^\r\n]+\$versionProperty\.Value[^\r\n]+3/);
   assert.match(loadLegacyTransaction, /Test-ExactIntegerValue[^\r\n]+\$transaction\.version[^\r\n]+1/);
   assert.doesNotMatch(loadTransaction, /version[^\r\n]+-isnot\s+\[int\]|\[int\]\$transaction\.version/);
 });
@@ -409,6 +532,128 @@ test("atomic replacement and legacy retirement enforce target existence observed
   assert.match(commitManifest, /-ExpectedExisted\s+\$false/);
 });
 
+test("transaction v3 rechecks the previous Skill hash at the final replacement boundary", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const loadTransaction = topLevelFunction(installer, "Get-InstallTransaction");
+  const writeJournal = topLevelFunction(installer, "Write-TransactionJournal");
+  const newTransaction = topLevelFunction(installer, "New-InstallTransaction");
+  const replaceFile = topLevelFunction(installer, "Replace-TransactionFile");
+  const replaceSkill = topLevelFunction(installer, "Replace-SkillFile");
+
+  assert.match(writeJournal, /previousSkillSha256\s*=\s*\$Transaction\.PreviousSkillSha256/);
+  assert.match(loadTransaction, /["']previousSkillSha256["']/);
+  assert.match(loadTransaction, /PreviousSkillSha256\s*=\s*\$previousSkillSha256\.ToUpperInvariant\(\)/);
+  assert.match(newTransaction, /PreviousSkillSha256\s*=\s*\$previousSkillSha256/);
+  assert.match(replaceFile, /\[string\]\$ExpectedCurrentSha256/);
+  assertOrdered(replaceFile, [
+    "$targetExists -ne $ExpectedExisted",
+    "if ($targetExists -and $ExpectedCurrentSha256.Length -gt 0)",
+    "(Get-ContentHash $Target) -ne $ExpectedCurrentSha256",
+    'throw "Agent Skill 内容在预检后已改变，拒绝覆盖',
+    "[IO.File]::Replace",
+  ]);
+  assert.match(
+    replaceSkill,
+    /-ExpectedCurrentSha256\s+\$Transaction\.PreviousSkillSha256/,
+  );
+});
+
+test("transaction v3 rollback verifies SkillBackup before replacing the current Skill", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const restoreFile = topLevelFunction(installer, "Restore-TransactionFile");
+  const rollback = topLevelFunction(installer, "Rollback-InstallTransaction");
+
+  assert.match(restoreFile, /\[string\]\$ExpectedBackupSha256\s*=\s*["']["']/);
+  assert.match(
+    restoreFile,
+    /\$PSBoundParameters[.]ContainsKey\(["']ExpectedBackupSha256["']\)/,
+  );
+  assertOrdered(restoreFile, [
+    "Get-PathEntryWithoutFollowingTarget $Backup",
+    "if (-not $Existed)",
+    'throw "回滚时出现不应存在的事务 backup，拒绝恢复',
+    "Get-ContentHash $Backup",
+    'throw "回滚时事务 backup 已被修改，拒绝恢复',
+    "Get-PathEntryWithoutFollowingTarget $Target",
+    "Remove-Item -LiteralPath $Target -Force",
+    "Move-Item -LiteralPath $Backup -Destination $Target",
+  ]);
+  assert.match(
+    rollback,
+    /if\s*\(\$Transaction[.]Version\s+-eq\s+3\)\s*\{[\s\S]*?Restore-TransactionFile\s+-Target\s+\$Transaction[.]SkillTarget[\s\S]*?-ExpectedBackupSha256\s+\$Transaction[.]PreviousSkillSha256[\s\S]*?\}\s*else\s*\{[\s\S]*?Restore-TransactionFile\s+-Target\s+\$Transaction[.]SkillTarget/,
+  );
+});
+
+test("transaction v3 rollback requires the untouched old Skill when SkillBackup is missing", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const restoreFile = topLevelFunction(installer, "Restore-TransactionFile");
+
+  assert.match(
+    restoreFile,
+    /elseif\s*\(\$PSBoundParameters[.]ContainsKey\(["']ExpectedBackupSha256["']\)\s+-and\s+\$Existed\)\s*\{\s*\$targetEntry\s*=\s*Get-PathEntryWithoutFollowingTarget\s+\$Target[\s\S]*?\$null\s+-eq\s+\$targetEntry[\s\S]*?Get-ContentHash\s+\$Target[\s\S]*?-ne\s+\$ExpectedBackupSha256[\s\S]*?throw\s+["']回滚时事务 backup 缺失且原目标无法证明未被替换，拒绝继续/,
+  );
+});
+
+test("same-process rollback distinguishes a rejected Skill update from an interrupted replacement", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const loadTransaction = topLevelFunction(installer, "Get-InstallTransaction");
+  const newTransaction = topLevelFunction(installer, "New-InstallTransaction");
+  const replaceFile = topLevelFunction(installer, "Replace-TransactionFile");
+  const replaceSkill = topLevelFunction(installer, "Replace-SkillFile");
+  const rollback = topLevelFunction(installer, "Rollback-InstallTransaction");
+
+  assert.match(loadTransaction, /SkillMutationStarted\s*=\s*\$true/);
+  assert.match(newTransaction, /SkillMutationStarted\s*=\s*\$false/);
+  assert.match(replaceFile, /\[psobject\]\$MutationState/);
+  assertOrdered(replaceFile, [
+    "(Get-ContentHash $Target) -ne $ExpectedCurrentSha256",
+    'throw "Agent Skill 内容在预检后已改变，拒绝覆盖',
+    "$MutationState.SkillMutationStarted = $true",
+    "[IO.File]::Replace",
+  ]);
+  assert.match(
+    replaceSkill,
+    /Replace-TransactionFile[^\r\n]+-MutationState\s+\$Transaction/,
+  );
+  assertOrdered(replaceSkill, [
+    "$Transaction.SkillMutationStarted = $true",
+    "Move-Item -LiteralPath $Transaction.SkillTemp -Destination $SkillDir",
+  ]);
+  assertOrdered(rollback, [
+    "if (-not $Transaction.SkillMutationStarted)",
+    "Get-PathEntryWithoutFollowingTarget $Transaction.SkillBackup",
+    'throw "Skill 变更尚未开始但出现事务 backup，拒绝继续回滚',
+    "elseif ($Transaction.Version -eq 3)",
+    "Restore-TransactionFile -Target $Transaction.SkillTarget",
+  ]);
+});
+
+test("transaction v3 cleanup verifies SkillBackup while transaction v2 keeps its recovery path", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const complete = topLevelFunction(installer, "Complete-InstallTransaction");
+  const removeVerifiedBackup = topLevelFunction(installer, "Remove-VerifiedLegacyBackup");
+
+  assertOrdered(removeVerifiedBackup, [
+    "Get-PathEntryWithoutFollowingTarget $Backup",
+    "Get-ContentHash $Backup",
+    'throw "legacy backup ownership 校验失败，拒绝删除',
+    "Remove-Item -LiteralPath $Backup -Force",
+  ]);
+  assert.match(
+    complete,
+    /if\s*\(\$Transaction[.]Version\s+-eq\s+3\)[\s\S]*?Remove-VerifiedLegacyBackup[\s\S]*?-Backup\s+\$Transaction[.]SkillBackup[\s\S]*?-ExpectedExisted\s+\$Transaction[.]SkillExisted[\s\S]*?-ExpectedSha256\s+\$Transaction[.]PreviousSkillSha256[\s\S]*?else\s*\{[\s\S]*?Remove-Item\s+-LiteralPath\s+\$Transaction[.]SkillBackup\s+-Force/,
+  );
+  assert.match(
+    complete,
+    /-ExpectedSha256\s+\$Transaction[.]PreviousSkillSha256\s*\r?\n\s*\}\s*catch\s*\{[\s\S]*?\$cleanupFailed\s*=\s*\$true/,
+  );
+  assertOrdered(complete, [
+    "-ExpectedSha256 $Transaction.PreviousSkillSha256",
+    "if ($cleanupFailed)",
+    "$TransactionJournal",
+  ]);
+});
+
 test("rollback never overwrites a target modified after an interrupted replacement", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const restoreFile = topLevelFunction(installer, "Restore-TransactionFile");
@@ -418,7 +663,7 @@ test("rollback never overwrites a target modified after an interrupted replaceme
     "Get-PathEntryWithoutFollowingTarget $Target",
     "Get-ContentHash $Target",
     "-ne $ExpectedNewSha256",
-    "throw",
+    'throw "回滚时目标在安装中断后已被修改，拒绝覆盖',
     "Remove-Item -LiteralPath $Target -Force",
     "Move-Item -LiteralPath $Backup -Destination $Target",
   ]);
@@ -476,7 +721,8 @@ test("Windows installer stages all content and commits through a recoverable jou
   const atomicWrite = topLevelFunction(installer, "Write-AtomicUtf8File");
 
   assert.match(installer, /\$TransactionJournal\s*=\s*Join-Path\s+\$HOME\s+["']\.legacy-code-atlas\.transaction\.json["']/);
-  assert.match(loadTransaction, /legacy-code-atlas-transaction-v2/);
+  assert.match(installer, /legacy-code-atlas-transaction-v2/);
+  assert.match(installer, /legacy-code-atlas-transaction-v3/);
   assert.match(loadTransaction, /\^\[0-9a-fA-F\]\{32\}\$/);
   assert.match(loadTransaction, /\.PSObject\.Properties/);
   assert.match(loadTransaction, /Get-CanonicalPath/);
@@ -485,6 +731,7 @@ test("Windows installer stages all content and commits through a recoverable jou
     "runtimeBackup",
     "skillTemp",
     "skillBackup",
+    "legacySkillBackup",
     "legacyToolBackup",
     "legacyCommandBackup",
     "manifestTemp",
@@ -516,6 +763,7 @@ test("Windows installer stages all content and commits through a recoverable jou
   assertOrdered(commit, [
     "Move-RuntimeIntoPlace",
     "Replace-SkillFile",
+    "Backup-LegacySkill",
     "Backup-LegacyTool",
     "Backup-LegacyCommand",
     "Commit-ManifestFile",
@@ -545,9 +793,9 @@ test("Agent Skill is fully staged in a sibling directory before namespace public
 
   assert.match(
     transactionPaths,
-    /SkillTemp\s*=\s*Get-CanonicalPath\s*\(\$SkillDir\s*\+\s*["']\.legacy-code-atlas-temp-\$transactionId["']\)/,
+    /SkillTemp\s*=\s*Get-CanonicalPath\s*\(\$SkillDirectory\s*\+\s*["']\.legacy-code-atlas-temp-\$transactionId["']\)/,
   );
-  assert.doesNotMatch(transactionPaths, /SkillTemp[^\r\n]+\$SkillTarget\s*\+/);
+  assert.doesNotMatch(transactionPaths, /SkillTemp[^\r\n]+\$SkillFile\s*\+/);
   assert.match(
     transactionSafety,
     /Assert-NoReparsePointInPath[^\r\n]+Join-Path\s+\$Transaction\.SkillTemp\s+["']SKILL\.md["']/,
@@ -623,6 +871,29 @@ test("Windows uninstaller validates the entire private runtime tree before delet
   ]);
 });
 
+test("Windows uninstaller rechecks an owned file hash immediately before deletion", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const uninstallStart = installer.indexOf("if ($Uninstall)");
+  const installStart = installer.indexOf("$nodeCommand = Get-Command node", uninstallStart);
+  assert.ok(uninstallStart >= 0 && installStart > uninstallStart, "missing uninstall block");
+  const uninstall = installer.slice(uninstallStart, installStart);
+  const removalStart = uninstall.indexOf("foreach ($entry in $filesToRemove)");
+  assert.ok(removalStart >= 0, "missing owned-file removal loop");
+  const removal = uninstall.slice(removalStart);
+
+  assertOrdered(removal, [
+    "Get-PathEntryWithoutFollowingTarget $entry.Path",
+    "$finalHash = Get-ContentHash $entry.Path",
+    "$finalHash -ne $entry.Sha256",
+    'Write-Warning "文件在卸载删除前已被修改，保留',
+    "Remove-Item -LiteralPath $entry.Path -Force",
+  ]);
+  assert.match(
+    removal,
+    /Write-Warning\s+["']文件在卸载删除前已被修改，保留[^\r\n]*\r?\n\s*continue\r?\n\s*}\r?\n\s*Remove-Item\s+-LiteralPath\s+\$entry[.]Path\s+-Force/,
+  );
+});
+
 test("rollback releases only a newly created and hash-proven Skill namespace", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const rollback = topLevelFunction(installer, "Rollback-InstallTransaction");
@@ -631,17 +902,17 @@ test("rollback releases only a newly created and hash-proven Skill namespace", a
   assert.match(rollback, /-not\s+\$Transaction\.SkillDirectoryExisted/);
   assert.match(
     rollback,
-    /\$skillTargetHash\s*=\s*Get-ContentHash\s+\$SkillTarget[\s\S]*\$skillTargetHash\s+-eq\s+\$Transaction\.SkillSha256/,
+    /\$skillTargetHash\s*=\s*Get-ContentHash\s+\$Transaction\.SkillTarget[\s\S]*\$skillTargetHash\s+-eq\s+\$Transaction\.SkillSha256/,
   );
-  assert.match(rollback, /Get-ChildItem[^\r\n]+\$SkillDir[^\r\n]+\.Count\s+-eq\s+0/);
+  assert.match(rollback, /Get-ChildItem[^\r\n]+\$Transaction\.SkillDir[^\r\n]+\.Count\s+-eq\s+0/);
   assertOrdered(rollback, [
-    "Get-ContentHash $SkillTarget",
+    "Get-ContentHash $Transaction.SkillTarget",
     "$ownsCreatedSkillNamespace = $true",
-    "Restore-TransactionFile -Target $SkillTarget",
+    "Restore-TransactionFile -Target $Transaction.SkillTarget",
     "Remove-AtlasTree $Transaction.SkillTemp",
     "if ($ownsCreatedSkillNamespace)",
-    "Get-PathEntryWithoutFollowingTarget $SkillDir",
-    "Remove-Item -LiteralPath $SkillDir -Force",
+    "Get-PathEntryWithoutFollowingTarget $Transaction.SkillDir",
+    "Remove-Item -LiteralPath $Transaction.SkillDir -Force",
   ]);
-  assert.doesNotMatch(rollback, /Remove-Item[^\r\n]+\$SkillDir[^\r\n]+-Recurse/);
+  assert.doesNotMatch(rollback, /Remove-Item[^\r\n]+\$Transaction\.SkillDir[^\r\n]+-Recurse/);
 });

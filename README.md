@@ -32,7 +32,7 @@ JSP / JavaScript
 
 这些固定命令要求 PowerShell 兼容或 POSIX/Git Bash Shell 语义，并能展开 `$HOME` 和 `$PWD`；仅提供 cmd.exe 的 host 不支持。第一次全量扫描应使用 host 最长可支持的 timeout；如果前台上限仍不足而 host 支持 background execution，就必须在后台启动后等待 `analyze` 完成，不能依赖短的默认 timeout。
 
-> **命名空间说明：** Atlas 的入口现在是 `/atlas`，安装在 `%USERPROFILE%\.agents\skills\atlas`，不再与 Understand-Anything 的 `/understand`（`%USERPROFILE%\.agents\skills\understand`）冲突，两者可以共存。若公司电脑装过旧版 Atlas（当时占用 `/understand` 入口），请先用当时下载的源码运行 `install.ps1 -Uninstall` 卸载旧版，再安装本版本。安装器不会覆盖不属于自己的现有 Skill 目录；不要直接删除未知的 Skill 目录。
+> **命名空间说明：** Atlas 的入口现在是 `/atlas`，安装在 `%USERPROFILE%\.agents\skills\atlas`，不再与 Understand-Anything 的 `/understand`（`%USERPROFILE%\.agents\skills\understand`）冲突，两者可以共存。最新版安装器会在有效的旧 v2/v3 ownership manifest 以精确路径和 SHA-256 证明归属时，自动把旧版 Atlas 的 `/understand` Skill 迁移到 `/atlas`。已有 Atlas runtime 或待迁移文件却没有有效 ownership manifest，或者文件已修改、来自第三方或不归 Atlas 所有、`/atlas` namespace 已被占用、相关路径含 reparse point 时，安装器会保留现场并停止，绝不覆盖未知文件；干净的首次安装不需要旧 manifest。
 
 ### 2. 安装到 OpenCode
 
@@ -155,7 +155,9 @@ Agent Skill 的位置固定在 `%USERPROFILE%\.agents\skills\atlas\SKILL.md`。�
 
 安装器仍把选定的 OpenCode 配置目录作为 `configDir` 保存到 `%USERPROFILE%\.legacy-code-atlas\.legacy-code-atlas-owner.json`，但在 v3 中它只用于诊断旧文件和检查冲突，不表示 Atlas 拥有该目录或其中的任何 tool。v3 manifest 的 `owner` 是 `legacy-code-atlas-install-v3`，`ownedFiles` 恰好只有一个 `agent-skill` entry。
 
-旧的 `commands\understand.md` Markdown command 已移除；当前 `/atlas` 入口是全局 Agent Skill。升级 v1/v2 时，安装器只会对旧 manifest 路径和 SHA-256 都证明归属的 `legacy_atlas.ts` 做一次事务性退休：匹配文件先移到 transaction backup，v3 manifest 提交后再清理；文件已缺失时继续升级。已修改的 owned tool 或任何 unowned/重复 tool 都会原样保留并阻止安装，等待人工确认来源。安装器不会写入替代 tool。
+旧的 `commands\understand.md` Markdown command 已移除；当前 `/atlas` 入口是全局 Agent Skill。有效的 v2/v3 manifest 若以预期路径和 SHA-256 证明 `skills\understand\SKILL.md` 属于旧版 Atlas，安装器会把它纳入迁移事务并发布新的 `skills\atlas\SKILL.md`；这不会迁移 Understand-Anything 或其他第三方的 `/understand` Skill。升级 v1/v2 时，安装器也只会对旧 manifest 以精确路径和 SHA-256 证明归属的 `legacy_atlas.ts` 和旧 command 做一次事务性退休，且不会写入替代 tool。
+
+预检会拒绝 reparse point、被占用的事务路径、未归属或已修改的旧文件，以及外来或已占用的 `/atlas` namespace；已有 runtime 或迁移候选却没有有效 ownership manifest 时也会停止。真正覆盖当前 Atlas Skill 或退休每个旧 Skill、tool、command 前，安装器还会最终复核预期存在状态，并对存在的文件重新校验 SHA-256。匹配的旧文件先移到本次事务的 backup；新 v3 manifest 提交后才清理仍通过存在性和哈希校验的 backup，失败回滚时也只恢复哈希匹配的 backup。旧文件已经缺失时可继续升级；任何无法证明归属的文件都会原样保留，等待人工确认来源。
 
 ## 更新和卸载
 
@@ -165,7 +167,7 @@ Agent Skill 的位置固定在 `%USERPROFILE%\.agents\skills\atlas\SKILL.md`。�
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-更新会复用 manifest 保存的 Skill 路径。安装器拥有的 Skill 被修改后会拒绝覆盖；v1/v2 迁移时，已修改的 owned 旧 tool/command 也会阻止迁移。先按[详细恢复说明](docs/opencode.md)确认文件来源并备份，不要直接删除冲突文件。
+更新会复用 manifest 保存的 Skill 路径。安装器拥有的 Skill 被修改后会拒绝覆盖；v1/v2 迁移时，已修改的 owned 旧 tool/command 也会阻止迁移。没有有效 ownership manifest 时不会自动迁移；先按[详细恢复说明](docs/opencode.md)确认文件来源并备份，不要直接删除冲突文件。
 
 卸载：
 

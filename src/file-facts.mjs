@@ -17,8 +17,8 @@ export const FACT_SCHEMA = "1.0.0";
 
 export const PARSER_VERSIONS = Object.freeze({
   java: "1.4.2",
-  jsp: "1.2.0",
-  javascript: "1.0.0",
+  jsp: "1.5.2",
+  javascript: "1.1.2",
   xml: "1.3.4",
   sql: "1.0.0",
   metadata: "1.0.0",

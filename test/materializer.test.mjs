@@ -3,8 +3,10 @@ import path from "node:path";
 import test from "node:test";
 
 import { parseFileBuffer } from "../src/file-facts.mjs";
+import { buildDocumentModel } from "../src/doc-model.mjs";
 import { serializeGraph } from "../src/graph.mjs";
 import { materializeRecords } from "../src/materializer.mjs";
+import { effectiveTilePages } from "../src/tile-composition.mjs";
 
 const projectRoot = path.resolve("/tmp/legacy-materializer-project");
 
@@ -83,6 +85,285 @@ test("materializer preserves JavaScript and iBATIS graph mutations", () => {
   assert.ok(edge(graph, "file:web/order.js", "requests", "route:/order.do"));
   assert.ok(edge(graph, "file:sqlmap/order.xml", "contains", "statement:order.save"));
   assert.ok(edge(graph, "statement:order.save", "writes_to", "table:dbo.t_order"));
+});
+
+test("external JavaScript requests inherit every loading page context", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("web/a/edit.jsp", "jsp", '<script src="/js/app.js"></script>', "markup"),
+      record("web/b/edit.jsp", "jsp", '<script src="/js/app.js"></script>', "markup"),
+      record("web/js/app.js", "javascript", [
+        "fetch('save.do');",
+        "fetch('/absolute.do');",
+      ].join("\n")),
+    ],
+  });
+  const model = buildDocumentModel(graph);
+
+  assert.equal(graph.nodes.some((node) => node.id === "route:save.do"), false);
+  for (const prefix of ["a", "b"]) {
+    assert.ok(edge(graph, "file:web/js/app.js", "requests", `route:/${prefix}/save.do`));
+    assert.equal(edge(graph, `page:web/${prefix}/edit.jsp`, "requests", `route:/${prefix}/save.do`), undefined);
+    const useCase = model.useCases.find(({ route }) => route === `/${prefix}/save.do`);
+    assert.ok(useCase.triggers.some(({ pagePath }) => pagePath === `web/${prefix}/edit.jsp`));
+    const page = model.pages.find(({ filePath }) => filePath === `web/${prefix}/edit.jsp`);
+    assert.ok(page.actions.some(({ target }) => target === `/${prefix}/save.do`));
+  }
+  assert.ok(edge(graph, "file:web/js/app.js", "requests", "route:/absolute.do"));
+  assert.equal(edge(graph, "page:web/a/edit.jsp", "requests", "route:/absolute.do"), undefined);
+  assert.equal(edge(graph, "page:web/b/edit.jsp", "requests", "route:/absolute.do"), undefined);
+  const absolute = model.useCases.find(({ route }) => route === "/absolute.do");
+  assert.deepEqual(absolute.triggers.map(({ pagePath }) => pagePath), ["web/a/edit.jsp", "web/b/edit.jsp"]);
+});
+
+test("external JavaScript request contexts stay scoped to their own evidence", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config>",
+        "  <action path='/a/edit' type='com.acme.EditAction'><forward name='view' path='/a.jsp'/></action>",
+        "  <action path='/b/edit' type='com.acme.EditAction'><forward name='view' path='/b.jsp'/></action>",
+        "</struts-config>",
+      ].join("\n"), "config"),
+      record("web/a.jsp", "jsp", '<script src="/js/app.js"></script>', "markup"),
+      record("web/b.jsp", "jsp", '<script src="/js/app.js"></script>', "markup"),
+      record("web/js/app.js", "javascript", [
+        'fetch("save.do", { method: "POST" });',
+        'fetch("../a/save.do", { method: "GET" });',
+        'fetch("/absolute.do", { method: "DELETE" });',
+        'fetch("../../absolute.do", { method: "PATCH" });',
+      ].join("\n")),
+    ],
+  });
+  const model = buildDocumentModel(graph);
+  const route = graph.nodes.find(({ id }) => id === "route:/a/save.do");
+
+  assert.deepEqual(route.data.requestHints.map(({ method }) => method).sort(), ["GET", "POST"]);
+  assert.deepEqual(
+    model.pages.find(({ filePath }) => filePath === "web/a.jsp").actions
+      .filter(({ target }) => target === "/a/save.do")
+      .map(({ method }) => method)
+      .sort(),
+    ["GET", "POST"],
+  );
+  assert.deepEqual(
+    model.pages.find(({ filePath }) => filePath === "web/b.jsp").actions
+      .filter(({ target }) => target === "/a/save.do")
+      .map(({ method }) => method),
+    ["GET"],
+  );
+
+  assert.deepEqual(
+    model.pages.find(({ filePath }) => filePath === "web/a.jsp").actions
+      .filter(({ target }) => target === "/absolute.do")
+      .map(({ method }) => method)
+      .sort(),
+    ["DELETE", "PATCH"],
+  );
+  assert.deepEqual(
+    model.pages.find(({ filePath }) => filePath === "web/b.jsp").actions
+      .filter(({ target }) => target === "/absolute.do")
+      .map(({ method }) => method)
+      .sort(),
+    ["DELETE", "PATCH"],
+  );
+});
+
+test("relative external JavaScript requests without a loading page stay unresolved", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/js/orphan.js", "javascript", "fetch('save.do');")],
+  });
+
+  assert.equal(graph.nodes.some((node) => node.type === "route"), false);
+  assert.ok(graph.warnings.some((warning) => warning.includes("unresolved relative JavaScript request: save.do")));
+});
+
+test("unknown fetch methods survive materialization into document requests", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/js/app.js", "javascript", "fetch('/orders.do', { method: verb });")],
+  });
+  const model = buildDocumentModel(graph);
+
+  assert.equal(model.useCases.find(({ route }) => route === "/orders.do").request.hasUnknownMethod, true);
+});
+
+test("relative browser requests resolve from every route arrival context", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config>",
+        "  <action path='/orders/edit' type='com.acme.EditAction'><forward name='view' path='/WEB-INF/views/edit.jsp'/></action>",
+        "  <action path='/admin/edit' type='com.acme.EditAction'><forward name='view' path='/WEB-INF/views/edit.jsp'/></action>",
+        "</struts-config>",
+      ].join("\n"), "config"),
+      record("web/WEB-INF/views/edit.jsp", "jsp", [
+        '<form action="save.do" method="post"><input name="id" value="7"></form>',
+        '<a href="list.do">List</a>',
+        '<script>fetch("inline.do")</script>',
+        '<script src="/js/app.js"></script>',
+      ].join("\n"), "markup"),
+      record("web/js/app.js", "javascript", 'fetch("external.do");'),
+    ],
+  });
+
+  for (const prefix of ["orders", "admin"]) {
+    assert.ok(edge(graph, "page:web/WEB-INF/views/edit.jsp", "submits_to", `route:/${prefix}/save.do`));
+    assert.ok(edge(graph, "page:web/WEB-INF/views/edit.jsp", "links_to", `route:/${prefix}/list.do`));
+    assert.ok(edge(graph, "page:web/WEB-INF/views/edit.jsp", "requests", `route:/${prefix}/inline.do`));
+    const external = edge(graph, "file:web/js/app.js", "requests", `route:/${prefix}/external.do`);
+    assert.ok(external);
+    assert.deepEqual(external.data.pageIds, ["page:web/WEB-INF/views/edit.jsp"]);
+  }
+  assert.equal(graph.nodes.some(({ id }) => id.startsWith("route:/WEB-INF/views/")), false);
+});
+
+test("current-document requests use the post-redirect route URL", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("WEB-INF/struts.xml", "xml", [
+        "<struts><package namespace='/orders'>",
+        "  <action name='start' class='com.acme.StartAction'>",
+        "    <result name='success' type='redirectAction'>review</result>",
+        "  </action>",
+        "  <action name='review' class='com.acme.ReviewAction'>",
+        "    <result name='success'>/WEB-INF/views/review.jsp</result>",
+        "  </action>",
+        "</package></struts>",
+      ].join("\n"), "config"),
+      record("web/WEB-INF/views/review.jsp", "jsp", [
+        '<form action=""><input name="id" value="7"></form>',
+        '<a href="?tab=detail">Details</a>',
+        '<script src="/js/review.js"></script>',
+      ].join("\n"), "markup"),
+      record("web/js/review.js", "javascript", 'fetch(""); fetch("?refresh=1");'),
+    ],
+  });
+  const route = graph.nodes.find(({ id }) => id === "route:/orders/review.action");
+
+  assert.ok(edge(graph, "route:/orders/start.action", "redirects_to", route.id));
+  assert.ok(edge(graph, "page:web/WEB-INF/views/review.jsp", "submits_to", route.id));
+  assert.ok(edge(graph, "page:web/WEB-INF/views/review.jsp", "links_to", route.id));
+  assert.ok(edge(graph, "file:web/js/review.js", "requests", route.id));
+  assert.equal(edge(graph, "page:web/WEB-INF/views/review.jsp", "submits_to", "route:/orders/start.action"), undefined);
+  assert.equal(edge(graph, "page:web/WEB-INF/views/review.jsp", "links_to", "route:/orders/start.action"), undefined);
+  assert.equal(edge(graph, "file:web/js/review.js", "requests", "route:/orders/start.action"), undefined);
+  assert.deepEqual(
+    route.data.requestHints.map(({ parameters }) => parameters),
+    [{ id: "7" }, { tab: "detail" }, {}, { refresh: "1" }],
+  );
+  assert.equal(graph.nodes.some(({ id }) => id === "route:/orders/start.action?tab=detail"), false);
+  assert.equal(graph.nodes.some(({ id }) => id.startsWith("route:/WEB-INF/views/")), false);
+});
+
+test("relative script sources resolve from the document route", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts-config.xml",
+        "xml",
+        "<struts-config><action path='/orders/edit' type='com.acme.EditAction'><forward name='view' path='/WEB-INF/views/edit.jsp'/></action></struts-config>",
+        "config",
+      ),
+      record("web/WEB-INF/views/edit.jsp", "jsp", '<script src="assets/app.js"></script>', "markup"),
+      record("web/orders/assets/app.js", "javascript", 'fetch("save.do");'),
+    ],
+  });
+
+  assert.ok(edge(graph, "page:web/WEB-INF/views/edit.jsp", "loads_script", "file:web/orders/assets/app.js"));
+  assert.ok(edge(graph, "file:web/orders/assets/app.js", "requests", "route:/orders/save.do"));
+  assert.equal(graph.warnings.some((warning) => warning.includes("unresolved JSP script")), false);
+  assert.equal(graph.nodes.some(({ id }) => id.startsWith("route:/WEB-INF/views/")), false);
+});
+
+test("included JSP scripts inherit the top-level document page and route", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config>",
+        "  <action path='/orders/edit' type='com.acme.EditAction'><forward name='view' path='/WEB-INF/views/edit.jsp'/></action>",
+        "</struts-config>",
+      ].join("\n"), "config"),
+      record("web/WEB-INF/views/edit.jsp", "jsp", '<jsp:include page="/WEB-INF/views/widget.jsp" />', "markup"),
+      record("web/WEB-INF/views/widget.jsp", "jsp", '<script src="/js/app.js"></script>', "markup"),
+      record("web/js/app.js", "javascript", 'fetch("save.do");'),
+    ],
+  });
+  const model = buildDocumentModel(graph);
+
+  assert.ok(edge(graph, "page:web/WEB-INF/views/edit.jsp", "loads_script", "file:web/js/app.js"));
+  assert.equal(edge(graph, "page:web/WEB-INF/views/widget.jsp", "loads_script", "file:web/js/app.js"), undefined);
+  assert.ok(edge(graph, "file:web/js/app.js", "requests", "route:/orders/save.do"));
+  assert.equal(graph.nodes.some(({ id }) => id === "route:/WEB-INF/views/save.do"), false);
+  const useCase = model.useCases.find(({ route }) => route === "/orders/save.do");
+  assert.deepEqual(useCase.triggers.map(({ pagePath }) => pagePath), ["web/WEB-INF/views/edit.jsp"]);
+});
+
+test("materializer ignores unresolved include paths from legacy cached facts", () => {
+  const jspRecord = record("web/source.jsp", "jsp", "<h1>Source</h1>", "markup");
+  jspRecord.facts.includes = [{
+    path: "${dynamicTarget}",
+    evidence: {
+      file: "web/source.jsp",
+      line: 1,
+      column: 1,
+      snippet: '<jsp:include page="${dynamicTarget}" />',
+    },
+  }];
+
+  const graph = materializeRecords({ projectRoot, records: [jspRecord] });
+
+  assert.equal(graph.nodes.some(({ id }) => id === "page:"), false);
+  assert.equal(graph.edges.some(({ type }) => type === "includes"), false);
+});
+
+test("include cycles terminate and retain the top-level document context", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts-config.xml",
+        "xml",
+        "<struts-config><action path='/cycle/view' type='com.acme.ViewAction'><forward name='view' path='/a.jsp'/></action></struts-config>",
+        "config",
+      ),
+      record("web/a.jsp", "jsp", '<jsp:include page="/b.jsp" />', "markup"),
+      record("web/b.jsp", "jsp", '<jsp:include page="/a.jsp" /><script>fetch("save.do")</script>', "markup"),
+    ],
+  });
+
+  assert.ok(edge(graph, "page:web/a.jsp", "requests", "route:/cycle/save.do"));
+  assert.equal(edge(graph, "page:web/b.jsp", "requests", "route:/cycle/save.do"), undefined);
+  assert.equal(graph.edges.filter((candidate) => candidate.target === "route:/cycle/save.do").length, 1);
+});
+
+test("browser request edges do not become document arrival contexts", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts-config.xml",
+        "xml",
+        "<struts-config><action path='/target/view' type='com.acme.ViewAction'><forward name='view' path='/target.jsp'/></action></struts-config>",
+        "config",
+      ),
+      record("web/source/source.jsp", "jsp", [
+        '<a href="/target/view.do">Target</a>',
+        '<script>fetch("save.do")</script>',
+      ].join("\n"), "markup"),
+      record("web/target.jsp", "jsp", "<h1>Target</h1>", "markup"),
+    ],
+  });
+
+  assert.ok(edge(graph, "page:web/source/source.jsp", "requests", "route:/source/save.do"));
+  assert.equal(edge(graph, "page:web/source/source.jsp", "requests", "route:/target/save.do"), undefined);
 });
 
 test("materializer resolves calls through method-local Java variables", () => {
@@ -248,6 +529,252 @@ test("materializer links Struts JSP taglib forms to DispatchAction methods", () 
 
   assert.ok(edge(graph, "page:web/order/edit.jsp", "submits_to", "route:/order/audit.do"));
   assert.ok(edge(graph, "route:/order/audit.do", "dispatches_to", "java_method:com.acme.OrderAction#audit/0"));
+});
+
+test("static link query parameters select Struts DispatchAction methods", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("web/order.jsp", "jsp", '<a href="/order.do?method=delete&id=7">Delete</a>', "markup"),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config>",
+        "  <action path='/order' type='com.acme.OrderAction' parameter='method'/>",
+        "</struts-config>",
+      ].join("\n"), "config"),
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction extends DispatchAction {",
+        "  public void delete() {}",
+        "}",
+      ].join("\n")),
+    ],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/order.do");
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { method: "delete", id: "7" });
+  assert.ok(edge(graph, "route:/order.do", "dispatches_to", "java_method:com.acme.OrderAction#delete/0"));
+});
+
+test("materializer preserves every form observation when one page submits to one route", () => {
+  const jsp = [
+    '<form action="/order.do" method="post">',
+    '  <input name="method" value="save">',
+    '</form>',
+    '<form action="/order.do" method="get">',
+    '  <input name="method" value="list">',
+    '</form>',
+  ].join("\n");
+
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/order.jsp", "jsp", jsp, "markup")],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/order.do");
+  const submissions = graph.edges.filter((candidate) => (
+    candidate.source === "page:web/order.jsp"
+      && candidate.type === "submits_to"
+      && candidate.target === route.id
+  ));
+
+  assert.deepEqual(route.data.requestHints.map(({ method, parameters }) => ({ method, parameters })), [
+    { method: "POST", parameters: { method: "save" } },
+    { method: "GET", parameters: { method: "list" } },
+  ]);
+  assert.equal(submissions.length, 1, "repeated forms remain one logical page-to-route relationship");
+  assert.deepEqual(submissions[0].evidence.map(({ file, line }) => ({ file, line })), [
+    { file: "web/order.jsp", line: 1 },
+    { file: "web/order.jsp", line: 4 },
+  ]);
+});
+
+test("materializer keeps legacy single-form bytes while retaining empty parameters for multiple forms", () => {
+  const single = materializeRecords({
+    projectRoot,
+    records: [record("web/single.jsp", "jsp", [
+      '<form action="/single.do">',
+      '  <input name="known" value="yes">',
+      '  <input name="blank">',
+      '</form>',
+    ].join("\n"), "markup")],
+  });
+  const singleRoute = single.nodes.find((node) => node.id === "route:/single.do");
+  const singlePage = single.nodes.find((node) => node.id === "page:web/single.jsp");
+
+  assert.deepEqual(singleRoute.data.requestHints[0].parameters, { known: "yes" });
+  assert.deepEqual(singlePage.data.fields, ["known", "blank"]);
+
+  const multiple = materializeRecords({
+    projectRoot,
+    records: [record("web/multiple.jsp", "jsp", [
+      '<form action="/first.do"><input name="first"></form>',
+      '<form action="/second.do"><input name="second"></form>',
+    ].join("\n"), "markup")],
+  });
+  const first = multiple.nodes.find((node) => node.id === "route:/first.do");
+  const second = multiple.nodes.find((node) => node.id === "route:/second.do");
+
+  assert.deepEqual(first.data.requestHints[0].parameters, { first: "" });
+  assert.deepEqual(second.data.requestHints[0].parameters, { second: "" });
+
+  const unresolved = materializeRecords({
+    projectRoot,
+    records: [record("web/unresolved.jsp", "jsp", [
+      '<form action="/known.do"><input name="known"></form>',
+      '<form action="${dynamic.action}"><input name="dynamic"></form>',
+    ].join("\n"), "markup")],
+  });
+  const known = unresolved.nodes.find((node) => node.id === "route:/known.do");
+
+  assert.deepEqual(known.data.requestHints[0].parameters, { known: "" });
+  assert.equal(known.data.requestHints[0].parametersComplete, true);
+});
+
+test("materializer preserves explicit query parameter names with dynamic values", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record(
+      "web/order.jsp",
+      "jsp",
+      '<form action="/orders.do?method=${bean.method}"></form>',
+      "markup",
+    )],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/orders.do");
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { method: "" });
+});
+
+test("single-form empty query values do not hide blank form inputs from use cases", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record(
+      "web/login.jsp",
+      "jsp",
+      '<form action="/login.do?mode=" method="post"><input name="username"></form>',
+      "markup",
+    )],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/login.do");
+  const model = buildDocumentModel(graph);
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { mode: "" });
+  assert.equal(route.data.requestHints[0].parametersComplete, false);
+  assert.deepEqual(model.useCases[0].inputs, ["username", "mode"]);
+});
+
+test("included single-form fields remain scoped to their request evidence", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("web/top.jsp", "jsp", [
+        '<jsp:include page="/fragment.jsp"/>',
+        '<jsp:include page="/sibling.jsp"/>',
+      ].join("\n"), "markup"),
+      record(
+        "web/fragment.jsp",
+        "jsp",
+        '<form action="login.do?mode=" method="post"><input name="username"></form>',
+        "markup",
+      ),
+      record("web/sibling.jsp", "jsp", '<input name="unrelated">', "markup"),
+    ],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/login.do");
+  const model = buildDocumentModel(graph);
+
+  assert.ok(edge(graph, "page:web/top.jsp", "submits_to", route.id));
+  assert.deepEqual(route.data.requestHints[0].parameters, { mode: "" });
+  assert.equal(route.data.requestHints[0].parametersComplete, false);
+  assert.deepEqual(graph.nodes.find(({ id }) => id === "page:web/top.jsp").data.fields, []);
+  assert.deepEqual(graph.nodes.find(({ id }) => id === "page:web/fragment.jsp").data.fields, ["username"]);
+  assert.deepEqual(model.useCases[0].inputs, ["username", "mode"]);
+});
+
+test("included mixed legacy hints recover each form from its own evidence", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("web/top.jsp", "jsp", [
+        '<jsp:include page="/a.jsp"/>',
+        '<jsp:include page="/b.jsp"/>',
+      ].join("\n"), "markup"),
+      record(
+        "web/a.jsp",
+        "jsp",
+        '<form action="save.do?mode="><input name="first"></form>',
+        "markup",
+      ),
+      record(
+        "web/b.jsp",
+        "jsp",
+        '<form action="save.do"><input name="second"></form>',
+        "markup",
+      ),
+    ],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/save.do");
+  const submission = edge(graph, "page:web/top.jsp", "submits_to", route.id);
+  const model = buildDocumentModel(graph);
+
+  assert.deepEqual(route.data.requestHints.map((hint) => ({
+    parameters: hint.parameters,
+    completeness: Object.hasOwn(hint, "parametersComplete") ? hint.parametersComplete : "legacy",
+  })), [
+    { parameters: { mode: "" }, completeness: false },
+    { parameters: {}, completeness: "legacy" },
+  ]);
+  assert.deepEqual(submission.evidence.map(({ file }) => file), ["web/a.jsp", "web/b.jsp"]);
+  assert.deepEqual(model.useCases[0].inputs, ["first", "second", "mode"]);
+});
+
+test("materializer locates explicit query names at the request evidence column", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record(
+      "web/order.jsp",
+      "jsp",
+      '<a href="?other=1">x</a><form action="/orders.do?method=${bean.method}&flag="></form>',
+      "markup",
+    )],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/orders.do");
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { method: "", flag: "" });
+});
+
+test("materializer marks one form's parameters complete when page fields remain outside it", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/scoped.jsp", "jsp", [
+      '<form action="/scoped.do"><input name="inside"></form>',
+      '<input name="outside">',
+    ].join("\n"), "markup")],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/scoped.do");
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { inside: "" });
+  assert.equal(route.data.requestHints[0].parametersComplete, true);
+});
+
+test("unsuccessful controls stay out of materialized use-case inputs", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/controls.jsp", "jsp", [
+      '<form action="/dispatch.do">',
+      '  <button name="method" value="save">Save</button>',
+      '  <button name="method" value="delete">Delete</button>',
+      '  <input type="reset" name="reset" value="yes">',
+      '  <input type="button" name="plain" value="yes">',
+      '  <input disabled name="disabled" value="yes">',
+      '</form>',
+    ].join("\n"), "markup")],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/dispatch.do");
+  const model = buildDocumentModel(graph);
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { method: "" });
+  assert.equal(route.data.requestHints[0].parametersComplete, true);
+  assert.deepEqual(model.useCases[0].inputs, ["method"]);
 });
 
 test("materializer keeps parser failures isolated and emits a deterministic warning", () => {
@@ -518,4 +1045,108 @@ test("Tiles inheritance resolves across XML files independent of record order", 
 
   assert.ok(edge(graph, "tiles_definition:order.page", "extends_tile", "tiles_definition:base.page"));
   assert.equal(graph.warnings.some((warning) => warning.includes("base.page")), false);
+});
+
+test("Tiles arrival contexts exclude overridden parent template and put pages", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts-config.xml",
+        "xml",
+        "<struts-config><action path='/orders/view' type='com.acme.ViewAction'><forward name='view' path='child.page'/></action></struts-config>",
+        "config",
+      ),
+      record("WEB-INF/tiles.xml", "xml", [
+        "<tiles-definitions>",
+        "  <definition name='base.page' template='/base-template.jsp'>",
+        "    <put name='body' value='/old-body.jsp'/>",
+        "    <put name='footer' value='/footer.jsp'/>",
+        "  </definition>",
+        "  <definition name='child.page' extends='base.page' template='/child-template.jsp'>",
+        "    <put name='body' value='/new-body.jsp'/>",
+        "  </definition>",
+        "</tiles-definitions>",
+      ].join("\n"), "config"),
+      record("web/base-template.jsp", "jsp", '<script>fetch("base-template.do")</script>', "markup"),
+      record("web/old-body.jsp", "jsp", '<script>fetch("old-body.do")</script>', "markup"),
+      record("web/child-template.jsp", "jsp", '<script>fetch("child-template.do")</script>', "markup"),
+      record("web/new-body.jsp", "jsp", '<script>fetch("new-body.do")</script>', "markup"),
+      record("web/footer.jsp", "jsp", '<script>fetch("footer.do")</script>', "markup"),
+    ],
+  });
+
+  for (const name of ["child-template", "new-body", "footer"]) {
+    assert.ok(graph.nodes.some(({ id }) => id === `route:/orders/${name}.do`), name);
+  }
+  for (const name of ["base-template", "old-body"]) {
+    assert.equal(graph.nodes.some(({ id }) => id === `route:/orders/${name}.do`), false, name);
+  }
+});
+
+test("cyclic Tiles inheritance terminates and preserves each effective page once", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts-config.xml",
+        "xml",
+        "<struts-config><action path='/cycle/view' type='com.acme.ViewAction'><forward name='view' path='cycle.a'/></action></struts-config>",
+        "config",
+      ),
+      record("WEB-INF/tiles.xml", "xml", [
+        "<tiles-definitions>",
+        "  <definition name='cycle.a' extends='cycle.b' template='/a.jsp'/>",
+        "  <definition name='cycle.b' extends='cycle.a'>",
+        "    <put name='body' value='/b.jsp'/>",
+        "  </definition>",
+        "</tiles-definitions>",
+      ].join("\n"), "config"),
+      record("web/a.jsp", "jsp", '<script>fetch("from-a.do")</script>', "markup"),
+      record("web/b.jsp", "jsp", '<script>fetch("from-b.do")</script>', "markup"),
+    ],
+  });
+
+  assert.ok(edge(graph, "tiles_definition:cycle.a", "extends_tile", "tiles_definition:cycle.b"));
+  assert.ok(edge(graph, "tiles_definition:cycle.b", "extends_tile", "tiles_definition:cycle.a"));
+  for (const name of ["from-a", "from-b"]) {
+    const requestEdges = graph.edges.filter((candidate) => (
+      candidate.type === "requests" && candidate.target === `route:/cycle/${name}.do`
+    ));
+    assert.equal(requestEdges.length, 1, name);
+  }
+});
+
+test("Tiles composition handles deep inheritance without recursive stack growth", () => {
+  const depth = 5_000;
+  const nodeById = new Map();
+  const outgoingBySource = new Map();
+  for (let index = 0; index < depth; index += 1) {
+    const nodeId = `tiles_definition:deep-${index}`;
+    nodeById.set(nodeId, { id: nodeId, type: "tiles_definition" });
+    if (index + 1 < depth) {
+      outgoingBySource.set(nodeId, [{
+        id: `extends:${index}`,
+        source: nodeId,
+        target: `tiles_definition:deep-${index + 1}`,
+        type: "extends_tile",
+      }]);
+    }
+  }
+  nodeById.set("page:deep.jsp", { id: "page:deep.jsp", type: "page" });
+  outgoingBySource.set(`tiles_definition:deep-${depth - 1}`, [{
+    id: "puts:body",
+    source: `tiles_definition:deep-${depth - 1}`,
+    target: "page:deep.jsp",
+    type: "puts",
+    data: { name: "body" },
+  }]);
+
+  const pages = effectiveTilePages("tiles_definition:deep-0", nodeById, outgoingBySource);
+
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].node.id, "page:deep.jsp");
+  assert.equal(pages[0].edges.length, depth);
+  assert.equal(pages[0].edges[0].id, "extends:0");
+  assert.equal(pages[0].edges.at(-1).id, "puts:body");
 });

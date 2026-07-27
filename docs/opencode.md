@@ -12,7 +12,7 @@ Legacy Code Atlas 不直接调用模型。OpenCode 是对话层并继续使用�
 
 ## Windows 安装
 
-Atlas 的 Agent Skill 现在安装在 `%USERPROFILE%\.agents\skills\atlas\SKILL.md`，入口是 `/atlas`，与 Understand-Anything 的 `%USERPROFILE%\.agents\skills\understand\SKILL.md`（入口 `/understand`）互不占用，可以共存。旧版 Atlas 曾占用 `skills\understand`；若它仍存在，请先用当时下载的源码运行 `install.ps1 -Uninstall` 卸载，再安装本版本。Atlas 安装器会拒绝覆盖不属于自己的现有目录；不要手工删除来源不明的 Skill 目录。
+Atlas 的 Agent Skill 现在安装在 `%USERPROFILE%\.agents\skills\atlas\SKILL.md`，入口是 `/atlas`，与 Understand-Anything 的 `%USERPROFILE%\.agents\skills\understand\SKILL.md`（入口 `/understand`）互不占用，可以共存。最新版安装器会在有效的旧 v2/v3 ownership manifest 以精确路径和 SHA-256 证明归属时，自动把旧版 Atlas 的 `/understand` Skill 迁移到 `/atlas`。已有 Atlas runtime 或待迁移文件却没有有效 ownership manifest，或者文件已修改、来自第三方或不归 Atlas 所有、`/atlas` namespace 已被占用、相关路径含 reparse point 时，安装器会保留现场并停止，绝不覆盖未知文件；干净的首次安装不需要旧 manifest。
 
 要求 Windows PowerShell 5.1 和 Node.js 20 或更高版本。下载并解压源码后，在 `legacy-code-atlas` 目录执行：
 
@@ -95,7 +95,9 @@ Agent Skill 是唯一的运行时入口。当前仓库不再发布 `integrations
 
 在 v3 中，`configDir` 只用于诊断旧文件和检查已知候选配置的冲突，不表示 Atlas 拥有该目录或其中的任何 tool。Agent Skill 始终位于 `%USERPROFILE%\.agents\skills\atlas\SKILL.md`，不受该变量影响。
 
-旧版 Markdown command `commands\understand.md` 已经移除。v1/v2 安装升级到 v3 时，只会退休旧 manifest 用精确路径和 SHA-256 证明归属的 `legacy_atlas.ts`；不会写入任何替代 tool。owned 旧 tool 已缺失时继续迁移；已修改的 owned tool，或 manifest 不拥有的重复 tool，会被原样保留并阻止安装，等待人工确认来源。v1 owned command 采用相同的哈希保护。
+旧版 Markdown command `commands\understand.md` 已经移除。有效的 v2/v3 manifest 若以预期路径和 SHA-256 证明 `skills\understand\SKILL.md` 属于旧版 Atlas，安装器会自动把它纳入迁移事务并发布新的 `skills\atlas\SKILL.md`；这不会迁移 Understand-Anything 或其他第三方的 `/understand` Skill。v1/v2 安装升级到 v3 时，也只会退休旧 manifest 以精确路径和 SHA-256 证明归属的 `legacy_atlas.ts` 和旧 command，不会写入任何替代 tool。
+
+预检会拒绝 reparse point、被占用的事务路径、未归属或已修改的旧文件，以及外来或已占用的 `/atlas` namespace；已有 runtime 或迁移候选却没有有效 ownership manifest 时也会停止。真正覆盖当前 Atlas Skill 或退休每个旧 Skill、tool、command 前，安装器还会最终复核预期存在状态，并对存在的文件重新校验 SHA-256。匹配的旧文件先移到本次事务的 backup；新 v3 manifest 提交后才清理仍通过存在性和哈希校验的 backup，失败回滚时也只恢复哈希匹配的 backup。旧文件已经缺失时可继续升级；任何无法证明归属的文件都会原样保留，等待人工确认来源。
 
 ## manifest v3
 

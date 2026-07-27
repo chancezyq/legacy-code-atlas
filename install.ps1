@@ -13,7 +13,8 @@ $OwnerValueV1 = "legacy-code-atlas-install-v1"
 $OwnerValueV2 = "legacy-code-atlas-install-v2"
 $OwnerValueV3 = "legacy-code-atlas-install-v3"
 $LegacyTransactionOwnerValue = "legacy-code-atlas-transaction-v1"
-$TransactionOwnerValue = "legacy-code-atlas-transaction-v2"
+$PreviousTransactionOwnerValue = "legacy-code-atlas-transaction-v2"
+$TransactionOwnerValue = "legacy-code-atlas-transaction-v3"
 $SourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir = Join-Path $HOME ".legacy-code-atlas"
 $OwnerMarker = Join-Path $InstallDir ".legacy-code-atlas-owner.json"
@@ -21,6 +22,8 @@ $TransactionJournal = Join-Path $HOME ".legacy-code-atlas.transaction.json"
 $CliTarget = Join-Path $InstallDir "bin\legacy-code-atlas.mjs"
 $SkillDir = Join-Path $HOME ".agents\skills\atlas"
 $SkillTarget = Join-Path $SkillDir "SKILL.md"
+$LegacySkillDir = Join-Path $HOME ".agents\skills\understand"
+$LegacySkillTarget = Join-Path $LegacySkillDir "SKILL.md"
 
 function Get-CanonicalPath([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -134,7 +137,13 @@ function Get-InstallManifest {
 
                 $expectedPath = $null
                 if ($kind -ceq "agent-skill") {
-                    $expectedPath = Get-CanonicalPath $SkillTarget
+                    if (Test-SamePath $path $SkillTarget) {
+                        $expectedPath = Get-CanonicalPath $SkillTarget
+                    } elseif (Test-SamePath $path $LegacySkillTarget) {
+                        $expectedPath = Get-CanonicalPath $LegacySkillTarget
+                    } else {
+                        return $null
+                    }
                 } else {
                     $expectedPath = $expectedToolTarget
                 }
@@ -168,7 +177,14 @@ function Get-InstallManifest {
             $path = Get-CanonicalPath ([string]$ownedFile.path)
             $sha256 = [string]$ownedFile.sha256
             if ($kind -cne "agent-skill") { return $null }
-            if (-not (Test-SamePath $path $SkillTarget)) { return $null }
+            $expectedSkillTarget = $null
+            if (Test-SamePath $path $SkillTarget) {
+                $expectedSkillTarget = Get-CanonicalPath $SkillTarget
+            } elseif (Test-SamePath $path $LegacySkillTarget) {
+                $expectedSkillTarget = Get-CanonicalPath $LegacySkillTarget
+            } else {
+                return $null
+            }
             if (-not (Test-Sha256 $sha256)) { return $null }
 
             return [pscustomobject]@{
@@ -177,7 +193,7 @@ function Get-InstallManifest {
                 ExternalFiles = @(
                     [pscustomobject]@{
                         Kind = "agent-skill"
-                        Path = Get-CanonicalPath $SkillTarget
+                        Path = $expectedSkillTarget
                         Sha256 = $sha256
                     }
                 )
@@ -248,6 +264,10 @@ function Assert-PublishedIntegrationFiles([psobject]$Transaction) {
     if ($Transaction.Mode -ceq "upgrade-v1" -and
         $null -ne (Get-PathEntryWithoutFollowingTarget $Transaction.LegacyCommandTarget)) {
         throw "legacy command 仍存在，拒绝提交 v3 ownership manifest：$($Transaction.LegacyCommandTarget)"
+    }
+    if ($Transaction.LegacySkillSha256.Length -gt 0 -and
+        $null -ne (Get-PathEntryWithoutFollowingTarget $Transaction.LegacySkillTarget)) {
+        throw "legacy Agent Skill 仍存在，拒绝提交 v3 ownership manifest：$($Transaction.LegacySkillTarget)"
     }
 }
 
@@ -430,13 +450,23 @@ function Replace-TransactionFile {
         [Parameter(Mandatory = $true)][string]$Temporary,
         [Parameter(Mandatory = $true)][string]$Target,
         [string]$Backup,
-        [Parameter(Mandatory = $true)][bool]$ExpectedExisted
+        [Parameter(Mandatory = $true)][bool]$ExpectedExisted,
+        [string]$ExpectedCurrentSha256 = "",
+        [psobject]$MutationState
     )
 
     $targetEntry = Get-PathEntryWithoutFollowingTarget $Target
     $targetExists = $null -ne $targetEntry
     if ($targetExists -ne $ExpectedExisted) {
         throw "目标存在状态在预检后已改变，拒绝覆盖：$Target"
+    }
+    if ($targetExists -and $ExpectedCurrentSha256.Length -gt 0) {
+        if ((Get-ContentHash $Target) -ne $ExpectedCurrentSha256) {
+            throw "Agent Skill 内容在预检后已改变，拒绝覆盖：$Target"
+        }
+    }
+    if ($null -ne $MutationState) {
+        $MutationState.SkillMutationStarted = $true
     }
     if ($targetExists) {
         [IO.File]::Replace($Temporary, $Target, $Backup, $true)
@@ -448,7 +478,9 @@ function Replace-TransactionFile {
 function Get-LegacyTransactionPaths {
     param(
         [Parameter(Mandatory = $true)][string]$TransactionId,
-        [Parameter(Mandatory = $true)][string]$ConfigDir
+        [Parameter(Mandatory = $true)][string]$ConfigDir,
+        [Parameter(Mandatory = $true)][string]$SkillDirectory,
+        [Parameter(Mandatory = $true)][string]$SkillFile
     )
 
     $configFull = Get-CanonicalPath $ConfigDir
@@ -457,12 +489,14 @@ function Get-LegacyTransactionPaths {
     return [ordered]@{
         RuntimeStage = Get-CanonicalPath (Join-Path $HOME ".legacy-code-atlas.stage-$transactionId")
         RuntimeBackup = Get-CanonicalPath (Join-Path $HOME ".legacy-code-atlas.backup-$transactionId")
-        SkillTemp = Get-CanonicalPath ($SkillDir + ".legacy-code-atlas-temp-$transactionId")
-        SkillBackup = Get-CanonicalPath ($SkillTarget + ".legacy-code-atlas-backup-$transactionId")
+        SkillTemp = Get-CanonicalPath ($SkillDirectory + ".legacy-code-atlas-temp-$transactionId")
+        SkillBackup = Get-CanonicalPath ($SkillFile + ".legacy-code-atlas-backup-$transactionId")
         ToolTemp = Get-CanonicalPath ($toolTarget + ".legacy-code-atlas-temp-$transactionId")
         ToolBackup = Get-CanonicalPath ($toolTarget + ".legacy-code-atlas-backup-$transactionId")
         LegacyCommandBackup = Get-CanonicalPath ($legacyCommandTarget + ".legacy-code-atlas-backup-$transactionId")
         ManifestTemp = Get-CanonicalPath ($OwnerMarker + ".legacy-code-atlas-temp-$transactionId")
+        SkillDir = Get-CanonicalPath $SkillDirectory
+        SkillTarget = Get-CanonicalPath $SkillFile
         ToolTarget = $toolTarget
         LegacyCommandTarget = $legacyCommandTarget
     }
@@ -534,7 +568,33 @@ function Get-LegacyInstallTransaction {
         if (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$transaction.configDir, $configDir)) {
             throw "事务 journal configDir 不是规范绝对路径。"
         }
-        $paths = Get-LegacyTransactionPaths -TransactionId $transactionId -ConfigDir $configDir
+        $currentPaths = Get-LegacyTransactionPaths `
+            -TransactionId $transactionId `
+            -ConfigDir $configDir `
+            -SkillDirectory $SkillDir `
+            -SkillFile $SkillTarget
+        $preRenamePaths = Get-LegacyTransactionPaths `
+            -TransactionId $transactionId `
+            -ConfigDir $configDir `
+            -SkillDirectory $LegacySkillDir `
+            -SkillFile $LegacySkillTarget
+        $paths = $null
+        foreach ($candidatePaths in @($currentPaths, $preRenamePaths)) {
+            if ([StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string]$transaction.skillTemp,
+                    $candidatePaths.SkillTemp
+                ) -and
+                [StringComparer]::OrdinalIgnoreCase.Equals(
+                    [string]$transaction.skillBackup,
+                    $candidatePaths.SkillBackup
+                )) {
+                $paths = $candidatePaths
+                break
+            }
+        }
+        if ($null -eq $paths) {
+            throw "事务 journal 包含任意或非推导路径：Skill namespace"
+        }
         $pathChecks = [ordered]@{
             runtimeStage = @([string]$transaction.runtimeStage, $paths.RuntimeStage)
             runtimeBackup = @([string]$transaction.runtimeBackup, $paths.RuntimeBackup)
@@ -590,6 +650,8 @@ function Get-LegacyInstallTransaction {
             ToolBackup = $paths.ToolBackup
             LegacyCommandBackup = $paths.LegacyCommandBackup
             ManifestTemp = $paths.ManifestTemp
+            SkillDir = $paths.SkillDir
+            SkillTarget = $paths.SkillTarget
             ToolTarget = $paths.ToolTarget
             LegacyCommandTarget = $paths.LegacyCommandTarget
         }
@@ -606,7 +668,7 @@ function Assert-LegacyTransactionPathsSafe([psobject]$Transaction) {
     Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.SkillTemp
     Assert-NoReparsePointInPath -Boundary $homeFull -Path (Join-Path $Transaction.SkillTemp "SKILL.md")
     Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.SkillBackup
-    Assert-NoReparsePointInPath -Boundary $homeFull -Path $SkillTarget
+    Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.SkillTarget
     Assert-NoReparsePointInPath -Boundary $Transaction.ConfigDir -Path $Transaction.ToolTemp
     Assert-NoReparsePointInPath -Boundary $Transaction.ConfigDir -Path $Transaction.ToolBackup
     Assert-NoReparsePointInPath -Boundary $Transaction.ConfigDir -Path $Transaction.ToolTarget
@@ -621,11 +683,20 @@ function Restore-TransactionFile {
         [Parameter(Mandatory = $true)][string]$Target,
         [Parameter(Mandatory = $true)][string]$Backup,
         [Parameter(Mandatory = $true)][bool]$Existed,
-        [Parameter(Mandatory = $true)][string]$ExpectedNewSha256
+        [Parameter(Mandatory = $true)][string]$ExpectedNewSha256,
+        [string]$ExpectedBackupSha256 = ""
     )
 
     $backupEntry = Get-PathEntryWithoutFollowingTarget $Backup
     if ($null -ne $backupEntry) {
+        if ($PSBoundParameters.ContainsKey("ExpectedBackupSha256")) {
+            if (-not $Existed) {
+                throw "回滚时出现不应存在的事务 backup，拒绝恢复：$Backup"
+            }
+            if ((Get-ContentHash $Backup) -ne $ExpectedBackupSha256) {
+                throw "回滚时事务 backup 已被修改，拒绝恢复：$Backup"
+            }
+        }
         $targetEntry = Get-PathEntryWithoutFollowingTarget $Target
         if ($null -ne $targetEntry) {
             if ((Get-ContentHash $Target) -ne $ExpectedNewSha256) {
@@ -634,6 +705,12 @@ function Restore-TransactionFile {
             Remove-Item -LiteralPath $Target -Force
         }
         Move-Item -LiteralPath $Backup -Destination $Target
+    } elseif ($PSBoundParameters.ContainsKey("ExpectedBackupSha256") -and $Existed) {
+        $targetEntry = Get-PathEntryWithoutFollowingTarget $Target
+        if ($null -eq $targetEntry -or
+            (Get-ContentHash $Target) -ne $ExpectedBackupSha256) {
+            throw "回滚时事务 backup 缺失且原目标无法证明未被替换，拒绝继续：$Backup"
+        }
     } elseif (-not $Existed) {
         $targetEntry = Get-PathEntryWithoutFollowingTarget $Target
         if ($null -ne $targetEntry) {
@@ -697,7 +774,7 @@ function Rollback-LegacyInstallTransaction([psobject]$Transaction) {
     $ownsCreatedSkillNamespace = $false
     if (($Transaction.Mode -ceq "fresh" -or $Transaction.Mode -ceq "upgrade-v1") -and
         -not $Transaction.SkillExisted) {
-        $skillTargetHash = Get-ContentHash $SkillTarget
+        $skillTargetHash = Get-ContentHash $Transaction.SkillTarget
         if ($skillTargetHash -eq $Transaction.SkillSha256) {
             $ownsCreatedSkillNamespace = $true
         }
@@ -716,7 +793,7 @@ function Rollback-LegacyInstallTransaction([psobject]$Transaction) {
         Move-Item -LiteralPath $Transaction.LegacyCommandBackup -Destination $Transaction.LegacyCommandTarget
     }
     Restore-TransactionFile -Target $Transaction.ToolTarget -Backup $Transaction.ToolBackup -Existed $Transaction.ToolExisted -ExpectedNewSha256 $Transaction.ToolSha256
-    Restore-TransactionFile -Target $SkillTarget -Backup $Transaction.SkillBackup -Existed $Transaction.SkillExisted -ExpectedNewSha256 $Transaction.SkillSha256
+    Restore-TransactionFile -Target $Transaction.SkillTarget -Backup $Transaction.SkillBackup -Existed $Transaction.SkillExisted -ExpectedNewSha256 $Transaction.SkillSha256
 
     if (Test-Path -LiteralPath $Transaction.RuntimeBackup) {
         if (Test-Path -LiteralPath $InstallDir) {
@@ -740,11 +817,11 @@ function Rollback-LegacyInstallTransaction([psobject]$Transaction) {
         Remove-AtlasTree $Transaction.SkillTemp
     }
     if ($ownsCreatedSkillNamespace) {
-        $skillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $SkillDir
+        $skillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $Transaction.SkillDir
         if ($null -ne $skillDirectoryEntry -and
             $skillDirectoryEntry.PSIsContainer -and
-            @(Get-ChildItem -LiteralPath $SkillDir -Force).Count -eq 0) {
-            Remove-Item -LiteralPath $SkillDir -Force
+            @(Get-ChildItem -LiteralPath $Transaction.SkillDir -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $Transaction.SkillDir -Force
         }
     }
     if (Test-Path -LiteralPath $Transaction.RuntimeStage) {
@@ -758,7 +835,9 @@ function Rollback-LegacyInstallTransaction([psobject]$Transaction) {
 function Get-TransactionPaths {
     param(
         [Parameter(Mandatory = $true)][string]$TransactionId,
-        [Parameter(Mandatory = $true)][string]$ConfigDir
+        [Parameter(Mandatory = $true)][string]$ConfigDir,
+        [Parameter(Mandatory = $true)][string]$SkillDirectory,
+        [Parameter(Mandatory = $true)][string]$SkillFile
     )
 
     $configFull = Get-CanonicalPath $ConfigDir
@@ -767,11 +846,15 @@ function Get-TransactionPaths {
     return [ordered]@{
         RuntimeStage = Get-CanonicalPath (Join-Path $HOME ".legacy-code-atlas.stage-$transactionId")
         RuntimeBackup = Get-CanonicalPath (Join-Path $HOME ".legacy-code-atlas.backup-$transactionId")
-        SkillTemp = Get-CanonicalPath ($SkillDir + ".legacy-code-atlas-temp-$transactionId")
-        SkillBackup = Get-CanonicalPath ($SkillTarget + ".legacy-code-atlas-backup-$transactionId")
+        SkillTemp = Get-CanonicalPath ($SkillDirectory + ".legacy-code-atlas-temp-$transactionId")
+        SkillBackup = Get-CanonicalPath ($SkillFile + ".legacy-code-atlas-backup-$transactionId")
+        LegacySkillBackup = Get-CanonicalPath ($LegacySkillTarget + ".legacy-code-atlas-backup-$transactionId")
         LegacyToolBackup = Get-CanonicalPath ($legacyToolTarget + ".legacy-code-atlas-backup-$transactionId")
         LegacyCommandBackup = Get-CanonicalPath ($legacyCommandTarget + ".legacy-code-atlas-backup-$transactionId")
         ManifestTemp = Get-CanonicalPath ($OwnerMarker + ".legacy-code-atlas-temp-$transactionId")
+        SkillDir = Get-CanonicalPath $SkillDirectory
+        SkillTarget = Get-CanonicalPath $SkillFile
+        LegacySkillTarget = Get-CanonicalPath $LegacySkillTarget
         LegacyToolTarget = $legacyToolTarget
         LegacyCommandTarget = $legacyCommandTarget
     }
@@ -782,6 +865,24 @@ function Get-InstallTransaction {
 
     try {
         $transaction = Get-Content -LiteralPath $TransactionJournal -Raw | ConvertFrom-Json
+        $ownerProperty = $transaction.PSObject.Properties["owner"]
+        $versionProperty = $transaction.PSObject.Properties["version"]
+        if ($null -eq $ownerProperty -or $ownerProperty.Value -isnot [string] -or
+            $null -eq $versionProperty) {
+            throw "事务 journal 缺少严格的 owner/version。"
+        }
+        $isPreviousTransaction = (
+            [string]$ownerProperty.Value -ceq $PreviousTransactionOwnerValue -and
+            (Test-ExactIntegerValue -Value $versionProperty.Value -Expected 2)
+        )
+        $isCurrentTransaction = (
+            [string]$ownerProperty.Value -ceq $TransactionOwnerValue -and
+            (Test-ExactIntegerValue -Value $versionProperty.Value -Expected 3)
+        )
+        if (-not $isPreviousTransaction -and -not $isCurrentTransaction) {
+            throw "事务 journal owner 或 version 无效。"
+        }
+
         $requiredProperties = @(
             "owner", "version", "id", "mode", "configDir", "manifestSha256", "skillSha256",
             "legacyToolSha256", "legacyCommandSha256", "runtimeExisted", "skillDirectoryExisted",
@@ -789,6 +890,12 @@ function Get-InstallTransaction {
             "runtimeBackup", "skillTemp", "skillBackup", "legacyToolBackup",
             "legacyCommandBackup", "manifestTemp"
         )
+        if ($isCurrentTransaction) {
+            $requiredProperties += @(
+                "previousSkillSha256", "legacySkillSha256",
+                "legacySkillExisted", "legacySkillBackup"
+            )
+        }
         $actualProperties = @($transaction.PSObject.Properties | ForEach-Object { $_.Name })
         if ($actualProperties.Count -ne $requiredProperties.Count) {
             throw "事务 journal 字段数量无效。"
@@ -798,30 +905,30 @@ function Get-InstallTransaction {
                 throw "事务 journal 缺少字段：$propertyName"
             }
         }
-        foreach ($stringName in @(
+        $stringProperties = @(
             "owner", "id", "mode", "configDir", "manifestSha256", "skillSha256",
             "legacyToolSha256", "legacyCommandSha256", "runtimeStage", "runtimeBackup",
             "skillTemp", "skillBackup", "legacyToolBackup", "legacyCommandBackup", "manifestTemp"
-        )) {
+        )
+        if ($isCurrentTransaction) {
+            $stringProperties += "previousSkillSha256", "legacySkillSha256", "legacySkillBackup"
+        }
+        foreach ($stringName in $stringProperties) {
             if ($transaction.PSObject.Properties[$stringName].Value -isnot [string]) {
                 throw "事务 journal 字符串字段类型无效：$stringName"
             }
         }
-        foreach ($booleanName in @(
+        $booleanProperties = @(
             "runtimeExisted", "skillDirectoryExisted", "skillExisted",
             "legacyToolExisted", "legacyCommandExisted"
-        )) {
+        )
+        if ($isCurrentTransaction) { $booleanProperties += "legacySkillExisted" }
+        foreach ($booleanName in $booleanProperties) {
             $booleanProperty = $transaction.PSObject.Properties[$booleanName]
             if ($null -eq $booleanProperty -or $booleanProperty.Value -isnot [bool]) {
                 throw "事务 journal 布尔字段无效：$booleanName"
             }
         }
-        if ([string]$transaction.owner -cne "legacy-code-atlas-transaction-v2" -or
-            [string]$transaction.owner -cne $TransactionOwnerValue -or
-            -not (Test-ExactIntegerValue -Value $transaction.version -Expected 2)) {
-            throw "事务 journal owner 或 version 无效。"
-        }
-
         $transactionId = [string]$transaction.id
         if ($transactionId -notmatch '^[0-9a-fA-F]{32}$') {
             throw "事务 journal id 无效。"
@@ -838,6 +945,23 @@ function Get-InstallTransaction {
 
         $legacyToolSha256 = [string]$transaction.legacyToolSha256
         $legacyCommandSha256 = [string]$transaction.legacyCommandSha256
+        $previousSkillSha256 = ""
+        $legacySkillSha256 = ""
+        $legacySkillExisted = $false
+        if ($isCurrentTransaction) {
+            $previousSkillSha256 = [string]$transaction.previousSkillSha256
+            $legacySkillSha256 = [string]$transaction.legacySkillSha256
+            $legacySkillExisted = [bool]$transaction.legacySkillExisted
+        }
+        if ($isCurrentTransaction) {
+            if ($transaction.skillExisted) {
+                if (-not (Test-Sha256 $previousSkillSha256)) {
+                    throw "事务 journal 已有 Agent Skill hash 无效。"
+                }
+            } elseif ($previousSkillSha256.Length -ne 0) {
+                throw "事务不能为不存在的 Agent Skill 声明旧 hash。"
+            }
+        }
         if ($mode -ceq "upgrade-v1" -or $mode -ceq "upgrade-v2") {
             if (-not (Test-Sha256 $legacyToolSha256)) {
                 throw "迁移事务 legacy tool hash 无效。"
@@ -852,12 +976,49 @@ function Get-InstallTransaction {
         } elseif ($legacyCommandSha256.Length -ne 0 -or $transaction.legacyCommandExisted) {
             throw "非 v1 迁移事务不能声明 legacy command。"
         }
+        if ($legacySkillSha256.Length -gt 0) {
+            if (($mode -cne "upgrade-v2" -and $mode -cne "update-v3") -or
+                -not (Test-Sha256 $legacySkillSha256)) {
+                throw "迁移事务 legacy Agent Skill hash 无效。"
+            }
+        } elseif ($legacySkillExisted) {
+            throw "事务不能声明无 ownership hash 的 legacy Agent Skill。"
+        }
 
         $configDir = Get-CanonicalPath ([string]$transaction.configDir)
         if (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$transaction.configDir, $configDir)) {
             throw "事务 journal configDir 不是规范绝对路径。"
         }
-        $paths = Get-TransactionPaths -TransactionId $transactionId -ConfigDir $configDir
+        $currentPaths = Get-TransactionPaths `
+            -TransactionId $transactionId `
+            -ConfigDir $configDir `
+            -SkillDirectory $SkillDir `
+            -SkillFile $SkillTarget
+        $paths = $currentPaths
+        if ($isPreviousTransaction) {
+            $preRenamePaths = Get-TransactionPaths `
+                -TransactionId $transactionId `
+                -ConfigDir $configDir `
+                -SkillDirectory $LegacySkillDir `
+                -SkillFile $LegacySkillTarget
+            $paths = $null
+            foreach ($candidatePaths in @($currentPaths, $preRenamePaths)) {
+                if ([StringComparer]::OrdinalIgnoreCase.Equals(
+                        [string]$transaction.skillTemp,
+                        $candidatePaths.SkillTemp
+                    ) -and
+                    [StringComparer]::OrdinalIgnoreCase.Equals(
+                        [string]$transaction.skillBackup,
+                        $candidatePaths.SkillBackup
+                    )) {
+                    $paths = $candidatePaths
+                    break
+                }
+            }
+            if ($null -eq $paths) {
+                throw "事务 journal 包含任意或非推导路径：Skill namespace"
+            }
+        }
         $pathChecks = [ordered]@{
             runtimeStage = @([string]$transaction.runtimeStage, $paths.RuntimeStage)
             runtimeBackup = @([string]$transaction.runtimeBackup, $paths.RuntimeBackup)
@@ -866,6 +1027,12 @@ function Get-InstallTransaction {
             legacyToolBackup = @([string]$transaction.legacyToolBackup, $paths.LegacyToolBackup)
             legacyCommandBackup = @([string]$transaction.legacyCommandBackup, $paths.LegacyCommandBackup)
             manifestTemp = @([string]$transaction.manifestTemp, $paths.ManifestTemp)
+        }
+        if ($isCurrentTransaction) {
+            $pathChecks["legacySkillBackup"] = @(
+                [string]$transaction.legacySkillBackup,
+                $paths.LegacySkillBackup
+            )
         }
         foreach ($pathName in $pathChecks.Keys) {
             $pathPair = $pathChecks[$pathName]
@@ -880,7 +1047,8 @@ function Get-InstallTransaction {
         if ($mode -ceq "fresh" -and
             ($transaction.runtimeExisted -or $transaction.skillDirectoryExisted -or
              $transaction.skillExisted -or $transaction.legacyToolExisted -or
-             $transaction.legacyCommandExisted)) {
+             $transaction.legacyCommandExisted -or $legacySkillExisted -or
+             $legacySkillSha256.Length -gt 0)) {
             throw "fresh 事务不能声明已有目标。"
         }
         if ($mode -cne "fresh" -and -not $transaction.runtimeExisted) {
@@ -892,28 +1060,36 @@ function Get-InstallTransaction {
         }
 
         return [pscustomobject]@{
-            Owner = $TransactionOwnerValue
-            Version = 2
+            Owner = [string]$ownerProperty.Value
+            Version = $(if ($isCurrentTransaction) { 3 } else { 2 })
             Id = $transactionId
             Mode = $mode
             ConfigDir = $configDir
             ManifestSha256 = ([string]$transaction.manifestSha256).ToUpperInvariant()
             SkillSha256 = ([string]$transaction.skillSha256).ToUpperInvariant()
+            PreviousSkillSha256 = $previousSkillSha256.ToUpperInvariant()
             LegacyToolSha256 = $legacyToolSha256.ToUpperInvariant()
             LegacyCommandSha256 = $legacyCommandSha256.ToUpperInvariant()
+            LegacySkillSha256 = $legacySkillSha256.ToUpperInvariant()
             ManifestContent = ""
+            SkillMutationStarted = $true
             RuntimeExisted = [bool]$transaction.runtimeExisted
             SkillDirectoryExisted = [bool]$transaction.skillDirectoryExisted
             SkillExisted = [bool]$transaction.skillExisted
             LegacyToolExisted = [bool]$transaction.legacyToolExisted
             LegacyCommandExisted = [bool]$transaction.legacyCommandExisted
+            LegacySkillExisted = [bool]$legacySkillExisted
             RuntimeStage = $paths.RuntimeStage
             RuntimeBackup = $paths.RuntimeBackup
             SkillTemp = $paths.SkillTemp
             SkillBackup = $paths.SkillBackup
+            LegacySkillBackup = $paths.LegacySkillBackup
             LegacyToolBackup = $paths.LegacyToolBackup
             LegacyCommandBackup = $paths.LegacyCommandBackup
             ManifestTemp = $paths.ManifestTemp
+            SkillDir = $paths.SkillDir
+            SkillTarget = $paths.SkillTarget
+            LegacySkillTarget = $paths.LegacySkillTarget
             LegacyToolTarget = $paths.LegacyToolTarget
             LegacyCommandTarget = $paths.LegacyCommandTarget
         }
@@ -930,7 +1106,11 @@ function Assert-TransactionPathsSafe([psobject]$Transaction) {
     Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.SkillTemp
     Assert-NoReparsePointInPath -Boundary $homeFull -Path (Join-Path $Transaction.SkillTemp "SKILL.md")
     Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.SkillBackup
-    Assert-NoReparsePointInPath -Boundary $homeFull -Path $SkillTarget
+    Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.SkillTarget
+    if ($Transaction.LegacySkillSha256.Length -gt 0) {
+        Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.LegacySkillTarget
+        Assert-NoReparsePointInPath -Boundary $homeFull -Path $Transaction.LegacySkillBackup
+    }
     Assert-NoReparsePointInPath -Boundary $Transaction.ConfigDir -Path $Transaction.LegacyToolTarget
     Assert-NoReparsePointInPath -Boundary $Transaction.ConfigDir -Path $Transaction.LegacyToolBackup
     Assert-NoReparsePointInPath -Boundary $Transaction.ConfigDir -Path $Transaction.LegacyCommandTarget
@@ -988,6 +1168,11 @@ function Complete-InstallTransaction([psobject]$Transaction) {
 
     foreach ($backupSpec in @(
         [pscustomobject]@{
+            Path = $Transaction.LegacySkillBackup
+            Existed = [bool]$Transaction.LegacySkillExisted
+            Sha256 = $Transaction.LegacySkillSha256
+        },
+        [pscustomobject]@{
             Path = $Transaction.LegacyToolBackup
             Existed = [bool]$Transaction.LegacyToolExisted
             Sha256 = $Transaction.LegacyToolSha256
@@ -998,6 +1183,7 @@ function Complete-InstallTransaction([psobject]$Transaction) {
             Sha256 = $Transaction.LegacyCommandSha256
         }
     )) {
+        if ($backupSpec.Sha256.Length -eq 0) { continue }
         try {
             Remove-VerifiedLegacyBackup -Backup $backupSpec.Path -ExpectedExisted $backupSpec.Existed -ExpectedSha256 $backupSpec.Sha256
         } catch {
@@ -1005,7 +1191,45 @@ function Complete-InstallTransaction([psobject]$Transaction) {
             $cleanupFailed = $true
         }
     }
-    foreach ($file in @($Transaction.SkillBackup, $Transaction.ManifestTemp)) {
+    if (-not $cleanupFailed -and $Transaction.LegacySkillSha256.Length -gt 0) {
+        try {
+            $legacySkillDirectory = Get-CanonicalPath (Split-Path -Parent $Transaction.LegacySkillTarget)
+            $legacySkillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $legacySkillDirectory
+            if ($null -ne $legacySkillDirectoryEntry -and
+                $legacySkillDirectoryEntry.PSIsContainer -and
+                -not ($legacySkillDirectoryEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                @(Get-ChildItem -LiteralPath $legacySkillDirectory -Force).Count -eq 0) {
+                Remove-Item -LiteralPath $legacySkillDirectory -Force
+            }
+        } catch {
+            Write-Warning $_.Exception.Message
+            $cleanupFailed = $true
+        }
+    }
+    if ($Transaction.Version -eq 3) {
+        try {
+            Remove-VerifiedLegacyBackup `
+                -Backup $Transaction.SkillBackup `
+                -ExpectedExisted $Transaction.SkillExisted `
+                -ExpectedSha256 $Transaction.PreviousSkillSha256
+        } catch {
+            Write-Warning $_.Exception.Message
+            $cleanupFailed = $true
+        }
+    } else {
+        if ($null -ne (Get-PathEntryWithoutFollowingTarget $Transaction.SkillBackup)) {
+            try {
+                Remove-Item -LiteralPath $Transaction.SkillBackup -Force
+            } catch {
+                Write-Warning $_.Exception.Message
+                $cleanupFailed = $true
+            }
+            if ($null -ne (Get-PathEntryWithoutFollowingTarget $Transaction.SkillBackup)) {
+                $cleanupFailed = $true
+            }
+        }
+    }
+    foreach ($file in @($Transaction.ManifestTemp)) {
         if ($null -ne (Get-PathEntryWithoutFollowingTarget $file)) {
             try {
                 Remove-Item -LiteralPath $file -Force
@@ -1049,7 +1273,7 @@ function Rollback-InstallTransaction([psobject]$Transaction) {
 
     $ownsCreatedSkillNamespace = $false
     if (-not $Transaction.SkillDirectoryExisted) {
-        $skillTargetHash = Get-ContentHash $SkillTarget
+        $skillTargetHash = Get-ContentHash $Transaction.SkillTarget
         if ($skillTargetHash -eq $Transaction.SkillSha256) {
             $ownsCreatedSkillNamespace = $true
         }
@@ -1072,7 +1296,24 @@ function Rollback-InstallTransaction([psobject]$Transaction) {
             -ExpectedExisted $Transaction.LegacyToolExisted `
             -ExpectedSha256 $Transaction.LegacyToolSha256
     }
-    Restore-TransactionFile -Target $SkillTarget -Backup $Transaction.SkillBackup -Existed $Transaction.SkillExisted -ExpectedNewSha256 $Transaction.SkillSha256
+    if ($Transaction.LegacySkillSha256.Length -gt 0) {
+        Restore-LegacyOwnedFile `
+            -Target $Transaction.LegacySkillTarget `
+            -Backup $Transaction.LegacySkillBackup `
+            -ExpectedExisted $Transaction.LegacySkillExisted `
+            -ExpectedSha256 $Transaction.LegacySkillSha256
+    }
+    if (-not $Transaction.SkillMutationStarted) {
+        if ($null -ne (Get-PathEntryWithoutFollowingTarget $Transaction.SkillBackup)) {
+            throw "Skill 变更尚未开始但出现事务 backup，拒绝继续回滚：$($Transaction.SkillBackup)"
+        }
+    } elseif ($Transaction.Version -eq 3) {
+        Restore-TransactionFile -Target $Transaction.SkillTarget -Backup $Transaction.SkillBackup -Existed $Transaction.SkillExisted `
+            -ExpectedNewSha256 $Transaction.SkillSha256 `
+            -ExpectedBackupSha256 $Transaction.PreviousSkillSha256
+    } else {
+        Restore-TransactionFile -Target $Transaction.SkillTarget -Backup $Transaction.SkillBackup -Existed $Transaction.SkillExisted -ExpectedNewSha256 $Transaction.SkillSha256
+    }
 
     if (Test-Path -LiteralPath $Transaction.RuntimeBackup) {
         if (Test-Path -LiteralPath $InstallDir) {
@@ -1091,12 +1332,12 @@ function Rollback-InstallTransaction([psobject]$Transaction) {
         Remove-AtlasTree $Transaction.SkillTemp
     }
     if ($ownsCreatedSkillNamespace) {
-        $skillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $SkillDir
+        $skillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $Transaction.SkillDir
         if ($null -ne $skillDirectoryEntry -and
             $skillDirectoryEntry.PSIsContainer -and
             -not ($skillDirectoryEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
-            @(Get-ChildItem -LiteralPath $SkillDir -Force).Count -eq 0) {
-            Remove-Item -LiteralPath $SkillDir -Force
+            @(Get-ChildItem -LiteralPath $Transaction.SkillDir -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $Transaction.SkillDir -Force
         }
     }
     if (Test-Path -LiteralPath $Transaction.RuntimeStage) {
@@ -1131,8 +1372,15 @@ function Recover-InstallTransaction {
             }
             return
         }
-        if ([string]$ownerProperty.Value -cne $TransactionOwnerValue -or
-            -not (Test-ExactIntegerValue -Value $versionProperty.Value -Expected 2)) {
+        $isPreviousTransaction = (
+            [string]$ownerProperty.Value -ceq $PreviousTransactionOwnerValue -and
+            (Test-ExactIntegerValue -Value $versionProperty.Value -Expected 2)
+        )
+        $isCurrentTransaction = (
+            [string]$ownerProperty.Value -ceq $TransactionOwnerValue -and
+            (Test-ExactIntegerValue -Value $versionProperty.Value -Expected 3)
+        )
+        if (-not $isPreviousTransaction -and -not $isCurrentTransaction) {
             throw "事务 journal owner/version 不受支持。"
         }
     } catch {
@@ -1152,25 +1400,29 @@ function Recover-InstallTransaction {
 function Write-TransactionJournal([psobject]$Transaction) {
     $journal = [ordered]@{
         owner = $TransactionOwnerValue
-        version = 2
+        version = 3
         id = $Transaction.Id
         mode = $Transaction.Mode
         configDir = Get-CanonicalPath $Transaction.ConfigDir
         manifestSha256 = $Transaction.ManifestSha256
         skillSha256 = $Transaction.SkillSha256
+        previousSkillSha256 = $Transaction.PreviousSkillSha256
         legacyToolSha256 = $Transaction.LegacyToolSha256
         legacyCommandSha256 = $Transaction.LegacyCommandSha256
+        legacySkillSha256 = $Transaction.LegacySkillSha256
         runtimeExisted = [bool]$Transaction.RuntimeExisted
         skillDirectoryExisted = [bool]$Transaction.SkillDirectoryExisted
         skillExisted = [bool]$Transaction.SkillExisted
         legacyToolExisted = [bool]$Transaction.LegacyToolExisted
         legacyCommandExisted = [bool]$Transaction.LegacyCommandExisted
+        legacySkillExisted = [bool]$Transaction.LegacySkillExisted
         runtimeStage = Get-CanonicalPath $Transaction.RuntimeStage
         runtimeBackup = Get-CanonicalPath $Transaction.RuntimeBackup
         skillTemp = Get-CanonicalPath $Transaction.SkillTemp
         skillBackup = Get-CanonicalPath $Transaction.SkillBackup
         legacyToolBackup = Get-CanonicalPath $Transaction.LegacyToolBackup
         legacyCommandBackup = Get-CanonicalPath $Transaction.LegacyCommandBackup
+        legacySkillBackup = Get-CanonicalPath $Transaction.LegacySkillBackup
         manifestTemp = Get-CanonicalPath $Transaction.ManifestTemp
     }
     Write-AtomicUtf8File -Path $TransactionJournal -Content ($journal | ConvertTo-Json -Depth 4)
@@ -1183,10 +1435,16 @@ function New-InstallTransaction {
     )
 
     $transactionId = [Guid]::NewGuid().ToString("N")
-    $paths = Get-TransactionPaths -TransactionId $transactionId -ConfigDir $ConfigDir
+    $paths = Get-TransactionPaths `
+        -TransactionId $transactionId `
+        -ConfigDir $ConfigDir `
+        -SkillDirectory $SkillDir `
+        -SkillFile $SkillTarget
     $mode = "fresh"
+    $previousSkillSha256 = ""
     $legacyToolSha256 = ""
     $legacyCommandSha256 = ""
+    $legacySkillSha256 = ""
     if ($null -ne $ExistingManifest) {
         if ($ExistingManifest.Version -eq 1) {
             $mode = "upgrade-v1"
@@ -1200,35 +1458,54 @@ function New-InstallTransaction {
                 $legacyToolSha256 = $entry.Sha256
             } elseif ($entry.Kind -ceq "legacy-command") {
                 $legacyCommandSha256 = $entry.Sha256
+            } elseif ($entry.Kind -ceq "agent-skill" -and
+                (Test-SamePath $entry.Path $LegacySkillTarget)) {
+                $legacySkillSha256 = $entry.Sha256
+            } elseif ($entry.Kind -ceq "agent-skill" -and
+                (Test-SamePath $entry.Path $SkillTarget)) {
+                $previousSkillSha256 = $entry.Sha256
             }
         }
     }
 
     $migratesTool = $mode -ceq "upgrade-v1" -or $mode -ceq "upgrade-v2"
     $migratesCommand = $mode -ceq "upgrade-v1"
+    $skillDirectoryExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $SkillDir))
+    $skillExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $SkillTarget))
+    if (-not $skillExisted) {
+        $previousSkillSha256 = ""
+    }
     return [pscustomobject]@{
         Owner = $TransactionOwnerValue
-        Version = 2
+        Version = 3
         Id = $transactionId
         Mode = $mode
         ConfigDir = Get-CanonicalPath $ConfigDir
         ManifestSha256 = ""
         SkillSha256 = ""
+        PreviousSkillSha256 = $previousSkillSha256
         LegacyToolSha256 = $legacyToolSha256
         LegacyCommandSha256 = $legacyCommandSha256
+        LegacySkillSha256 = $legacySkillSha256
         ManifestContent = ""
+        SkillMutationStarted = $false
         RuntimeExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $InstallDir))
-        SkillDirectoryExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $SkillDir))
-        SkillExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $SkillTarget))
+        SkillDirectoryExisted = $skillDirectoryExisted
+        SkillExisted = $skillExisted
         LegacyToolExisted = [bool]($migratesTool -and $null -ne (Get-PathEntryWithoutFollowingTarget $paths.LegacyToolTarget))
         LegacyCommandExisted = [bool]($migratesCommand -and $null -ne (Get-PathEntryWithoutFollowingTarget $paths.LegacyCommandTarget))
+        LegacySkillExisted = [bool]($legacySkillSha256.Length -gt 0 -and $null -ne (Get-PathEntryWithoutFollowingTarget $paths.LegacySkillTarget))
         RuntimeStage = $paths.RuntimeStage
         RuntimeBackup = $paths.RuntimeBackup
         SkillTemp = $paths.SkillTemp
         SkillBackup = $paths.SkillBackup
+        LegacySkillBackup = $paths.LegacySkillBackup
         LegacyToolBackup = $paths.LegacyToolBackup
         LegacyCommandBackup = $paths.LegacyCommandBackup
         ManifestTemp = $paths.ManifestTemp
+        SkillDir = $paths.SkillDir
+        SkillTarget = $paths.SkillTarget
+        LegacySkillTarget = $paths.LegacySkillTarget
         LegacyToolTarget = $paths.LegacyToolTarget
         LegacyCommandTarget = $paths.LegacyCommandTarget
     }
@@ -1259,6 +1536,27 @@ function Assert-NoUnownedLegacyIntegrationFiles {
     $userProfile = $env:USERPROFILE
     if ([string]::IsNullOrWhiteSpace([string]$userProfile)) {
         $userProfile = $HOME
+    }
+
+    $legacySkillEntry = Get-PathEntryWithoutFollowingTarget $LegacySkillTarget
+    if ($null -ne $legacySkillEntry -and
+        -not (Test-ManifestOwnsExternalPath -Manifest $ExistingManifest -Kind "agent-skill" -Path $LegacySkillTarget)) {
+        Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $LegacySkillTarget
+        if ($legacySkillEntry.PSIsContainer) {
+            throw "旧 /understand Skill 候选不是普通文件，无法安全识别：$LegacySkillTarget。安装器已保留现场并停止。"
+        }
+        [byte[]]$legacySkillBytes = @(
+            Get-Content -LiteralPath $LegacySkillTarget -Encoding Byte -TotalCount 1048576 -ReadCount 0
+        )
+        $legacySkillContent = [Text.Encoding]::UTF8.GetString($legacySkillBytes)
+        $hasLegacyAtlasSignature = (
+            $legacySkillContent.Contains(".legacy-code-atlas/bin/legacy-code-atlas.mjs") -or
+            $legacySkillContent.Contains("legacy_atlas_")
+        )
+        if ($hasLegacyAtlasSignature) {
+            $legacySkillHash = (Get-ContentHash $LegacySkillTarget).ToUpperInvariant()
+            throw "检测到无有效 ownership manifest 的旧 Atlas /understand Skill：$LegacySkillTarget（SHA-256: $legacySkillHash）。安装器已保留文件并停止；请先备份并确认来源，不要直接删除该 Skill。"
+        }
     }
 
     $globalConfigDir = $null
@@ -1348,13 +1646,20 @@ function Assert-InstallTransactionPreflight {
     Assert-TargetPathsSafe
     Assert-TransactionPathsSafe $Transaction
     Assert-DirectoryOrMissing $SkillDir
+    if ($Transaction.LegacySkillSha256.Length -gt 0) {
+        Assert-DirectoryOrMissing $LegacySkillDir
+    }
 
-    foreach ($artifact in @(
+    $transactionArtifacts = @(
         $Transaction.RuntimeStage, $Transaction.RuntimeBackup,
         $Transaction.SkillTemp, $Transaction.SkillBackup,
         $Transaction.LegacyToolBackup, $Transaction.LegacyCommandBackup,
         $Transaction.ManifestTemp
-    )) {
+    )
+    if ($Transaction.LegacySkillSha256.Length -gt 0) {
+        $transactionArtifacts += $Transaction.LegacySkillBackup
+    }
+    foreach ($artifact in $transactionArtifacts) {
         if ($null -ne (Get-PathEntryWithoutFollowingTarget $artifact)) {
             throw "事务临时路径已被占用，拒绝覆盖：$artifact"
         }
@@ -1381,7 +1686,11 @@ function Assert-InstallTransactionPreflight {
             throw "安装文件已被修改，拒绝覆盖：$($entry.Path)"
         }
     }
-    if ($ExistingManifest.Version -eq 1 -and
+    $ownsCurrentSkill = Test-ManifestOwnsExternalPath `
+        -Manifest $ExistingManifest `
+        -Kind "agent-skill" `
+        -Path $SkillTarget
+    if (-not $ownsCurrentSkill -and
         $null -ne (Get-PathEntryWithoutFollowingTarget $SkillDir)) {
         throw "拒绝覆盖已有 Agent Skill 文件或目录：$SkillDir。两个 Skill 不能同时占用同一个 /atlas namespace；该目录可能来自旧安装或其他插件。安装器不会覆盖或删除现有文件。请先备份，再按来源插件的卸载或禁用流程处理。"
     }
@@ -1473,6 +1782,7 @@ function Replace-SkillFile([psobject]$Transaction) {
         if ((Get-ContentHash $stagedSkillTarget) -ne $Transaction.SkillSha256) {
             throw "Agent Skill stage 内容在发布前发生变化，拒绝发布。"
         }
+        $Transaction.SkillMutationStarted = $true
         Move-Item -LiteralPath $Transaction.SkillTemp -Destination $SkillDir
         return
     }
@@ -1481,7 +1791,7 @@ function Replace-SkillFile([psobject]$Transaction) {
     if ($null -eq $currentSkillDirectory -or -not $currentSkillDirectory.PSIsContainer) {
         throw "Agent Skill namespace 在预检后消失或类型改变，拒绝发布：$SkillDir"
     }
-    Replace-TransactionFile -Temporary $stagedSkillTarget -Target $SkillTarget -Backup $Transaction.SkillBackup -ExpectedExisted $Transaction.SkillExisted
+    Replace-TransactionFile -Temporary $stagedSkillTarget -Target $SkillTarget -Backup $Transaction.SkillBackup -ExpectedExisted $Transaction.SkillExisted -ExpectedCurrentSha256 $Transaction.PreviousSkillSha256 -MutationState $Transaction
     if ($null -ne (Get-PathEntryWithoutFollowingTarget $Transaction.SkillTemp)) {
         Remove-AtlasTree $Transaction.SkillTemp
     }
@@ -1519,6 +1829,22 @@ function Backup-LegacyCommand([psobject]$Transaction) {
     }
 }
 
+function Backup-LegacySkill([psobject]$Transaction) {
+    if ($Transaction.LegacySkillSha256.Length -eq 0) { return }
+    Assert-TransactionPathsSafe $Transaction
+    $legacySkillEntry = Get-PathEntryWithoutFollowingTarget $Transaction.LegacySkillTarget
+    $legacySkillExists = $null -ne $legacySkillEntry
+    if ($legacySkillExists -ne $Transaction.LegacySkillExisted) {
+        throw "legacy Agent Skill 目标存在状态在预检后已改变，拒绝迁移：$($Transaction.LegacySkillTarget)"
+    }
+    if ($legacySkillExists) {
+        if ((Get-ContentHash $Transaction.LegacySkillTarget) -ne $Transaction.LegacySkillSha256) {
+            throw "legacy Agent Skill 内容在预检后已改变，拒绝迁移：$($Transaction.LegacySkillTarget)"
+        }
+        Move-Item -LiteralPath $Transaction.LegacySkillTarget -Destination $Transaction.LegacySkillBackup
+    }
+}
+
 function Commit-ManifestFile([psobject]$Transaction) {
     Assert-TransactionPathsSafe $Transaction
     Replace-TransactionFile -Temporary $Transaction.ManifestTemp -Target $OwnerMarker -ExpectedExisted $false
@@ -1528,6 +1854,7 @@ function Commit-InstallTransaction([psobject]$Transaction) {
     Assert-TransactionPathsSafe $Transaction
     Move-RuntimeIntoPlace $Transaction
     Replace-SkillFile $Transaction
+    Backup-LegacySkill $Transaction
     Backup-LegacyTool $Transaction
     Backup-LegacyCommand $Transaction
     Assert-PublishedIntegrationFiles $Transaction
@@ -1582,7 +1909,7 @@ if ($Uninstall) {
         throw "拒绝卸载：$InstallDir 没有有效的 Legacy Code Atlas ownership manifest。"
     }
 
-    Assert-TargetPathsSafe
+    Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $InstallDir
     Assert-NoReparsePointTree $InstallDir
     $filesToRemove = @()
     foreach ($entry in @($existingManifest.ExternalFiles)) {
@@ -1600,26 +1927,33 @@ if ($Uninstall) {
         }
     }
 
-    $removedOwnedSkill = $false
+    $ownedSkillDirectories = @{}
     foreach ($entry in $filesToRemove) {
         if ($entry.Kind -ceq "agent-skill") {
             Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $entry.Path
         } else {
             Assert-NoReparsePointInPath -Boundary $OpenCodeConfigDir -Path $entry.Path
         }
+        if ($null -eq (Get-PathEntryWithoutFollowingTarget $entry.Path)) { continue }
+        $finalHash = Get-ContentHash $entry.Path
+        if ($finalHash -ne $entry.Sha256) {
+            Write-Warning "文件在卸载删除前已被修改，保留：$($entry.Path)"
+            continue
+        }
         Remove-Item -LiteralPath $entry.Path -Force
         if ($entry.Kind -ceq "agent-skill") {
-            $removedOwnedSkill = $true
+            $ownedSkillDirectory = Get-CanonicalPath (Split-Path -Parent $entry.Path)
+            $ownedSkillDirectories[$ownedSkillDirectory.ToUpperInvariant()] = $ownedSkillDirectory
         }
     }
-    if ($removedOwnedSkill) {
-        Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $SkillDir
-        $skillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $SkillDir
+    foreach ($ownedSkillDirectory in @($ownedSkillDirectories.Values)) {
+        Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $ownedSkillDirectory
+        $skillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $ownedSkillDirectory
         if ($null -ne $skillDirectoryEntry -and
             $skillDirectoryEntry.PSIsContainer -and
             -not ($skillDirectoryEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
-            @(Get-ChildItem -LiteralPath $SkillDir -Force).Count -eq 0) {
-            Remove-Item -LiteralPath $SkillDir -Force
+            @(Get-ChildItem -LiteralPath $ownedSkillDirectory -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $ownedSkillDirectory -Force
         }
     }
 

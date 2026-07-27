@@ -91,10 +91,10 @@ async function assertInstrumentedFailure({ instrumentedInstallerPath, sandbox, m
   );
 }
 
-function legacyV1TransactionPaths({ sandbox, configDir, id }) {
+function legacyV1TransactionPaths({ sandbox, configDir, id, skillName = "atlas" }) {
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
   const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", skillName);
   const skillTarget = path.join(skillDir, "SKILL.md");
   const toolTarget = path.join(configDir, "tools", "legacy_atlas.ts");
   const commandTarget = path.join(configDir, "commands", "understand.md");
@@ -117,8 +117,9 @@ async function writeLegacyV1TransactionJournal({
   manifestSha256,
   skillSha256,
   toolSha256,
+  skillName = "atlas",
 }) {
-  const paths = legacyV1TransactionPaths({ sandbox, configDir, id });
+  const paths = legacyV1TransactionPaths({ sandbox, configDir, id, skillName });
   const journal = {
     owner: "legacy-code-atlas-transaction-v1",
     version: 1,
@@ -131,6 +132,55 @@ async function writeLegacyV1TransactionJournal({
     runtimeExisted: true,
     skillExisted: true,
     toolExisted: true,
+    legacyCommandExisted: false,
+    ...paths,
+  };
+  const journalPath = path.join(sandbox.homeDir, ".legacy-code-atlas.transaction.json");
+  await writeFile(journalPath, `\uFEFF${JSON.stringify(journal, null, 2)}`, "utf8");
+  return { journalPath, journal, ...paths };
+}
+
+function legacyV2TransactionPaths({ sandbox, configDir, id, skillName = "atlas" }) {
+  const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
+  const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", skillName);
+  const skillTarget = path.join(skillDir, "SKILL.md");
+  const legacyToolTarget = path.join(configDir, "tools", "legacy_atlas.ts");
+  const legacyCommandTarget = path.join(configDir, "commands", "understand.md");
+  return {
+    runtimeStage: path.join(sandbox.homeDir, `.legacy-code-atlas.stage-${id}`),
+    runtimeBackup: path.join(sandbox.homeDir, `.legacy-code-atlas.backup-${id}`),
+    skillTemp: `${skillDir}.legacy-code-atlas-temp-${id}`,
+    skillBackup: `${skillTarget}.legacy-code-atlas-backup-${id}`,
+    legacyToolBackup: `${legacyToolTarget}.legacy-code-atlas-backup-${id}`,
+    legacyCommandBackup: `${legacyCommandTarget}.legacy-code-atlas-backup-${id}`,
+    manifestTemp: `${ownerMarker}.legacy-code-atlas-temp-${id}`,
+  };
+}
+
+async function writeLegacyV2TransactionJournal({
+  sandbox,
+  configDir,
+  id,
+  manifestSha256,
+  skillSha256,
+  skillName = "atlas",
+}) {
+  const paths = legacyV2TransactionPaths({ sandbox, configDir, id, skillName });
+  const journal = {
+    owner: "legacy-code-atlas-transaction-v2",
+    version: 2,
+    id,
+    mode: "update-v3",
+    configDir,
+    manifestSha256,
+    skillSha256,
+    legacyToolSha256: "",
+    legacyCommandSha256: "",
+    runtimeExisted: true,
+    skillDirectoryExisted: true,
+    skillExisted: true,
+    legacyToolExisted: false,
     legacyCommandExisted: false,
     ...paths,
   };
@@ -323,6 +373,24 @@ test("v3 fixture owns only the Agent Skill and never creates an OpenCode tools d
   assert.equal(await pathExists(path.join(savedConfigDir, "tools")), false);
 });
 
+test("v2 and v3 fixtures reproduce released pre-rename understand ownership", async (t) => {
+  for (const version of [2, 3]) {
+    const sandbox = await createWindowsInstallerSandbox(t, {
+      prefix: `legacy-atlas-v${version}-understand-fixture-`,
+    });
+    const fixture = version === 2
+      ? await windowsHarness.createV2Install(sandbox, { skillName: "understand" })
+      : await createV3Install(sandbox, { skillName: "understand" });
+
+    assert.equal(path.basename(path.dirname(fixture.skillTarget)), "understand");
+    assert.equal(
+      path.normalize(fixture.manifest.ownedFiles.find((entry) => entry.kind === "agent-skill").path),
+      path.normalize(fixture.skillTarget),
+    );
+    assert.equal(await sha256(fixture.skillTarget), fixture.skillHash);
+  }
+});
+
 test("failure instrumentation modifies only an isolated minimal installer source", async (t) => {
   assert.equal(typeof windowsHarness.createInstrumentedInstaller, "function");
 
@@ -361,6 +429,7 @@ test("failure instrumentation modifies only an isolated minimal installer source
     "after-journal",
     "after-skill-stage-directory",
     "after-runtime",
+    "after-legacy-skill",
     "after-legacy-tool",
     "after-legacy-command",
     "after-manifest",
@@ -396,6 +465,41 @@ test("failure instrumentation modifies only an isolated minimal installer source
     "the race fixture must occupy the namespace before the installer's second check",
   );
 
+  const concurrentSkillEdit = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "before-skill-replace",
+    action: "modify-skill",
+  });
+  const skillEditInstaller = await readFile(concurrentSkillEdit.installerPath, "utf8");
+  assert.match(
+    skillEditInstaller,
+    /LEGACY_CODE_ATLAS_TEST_FAILPOINT:before-skill-replace:modify-skill/,
+  );
+  assert.match(skillEditInstaller, /WriteAllText\(\$SkillTarget/);
+  assert.ok(
+    skillEditInstaller.indexOf("[IO.File]::WriteAllText($SkillTarget")
+      < skillEditInstaller.indexOf("Replace-TransactionFile -Temporary $stagedSkillTarget"),
+    "the race fixture must modify the existing Skill before its final replacement check",
+  );
+
+  const concurrentUninstallEdit = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "before-uninstall-final-hash",
+    action: "modify-skill",
+  });
+  const uninstallEditInstaller = await readFile(concurrentUninstallEdit.installerPath, "utf8");
+  assert.match(
+    uninstallEditInstaller,
+    /LEGACY_CODE_ATLAS_TEST_FAILPOINT:before-uninstall-final-hash:modify-skill/,
+  );
+  assert.ok(
+    uninstallEditInstaller.indexOf("[IO.File]::WriteAllText($SkillTarget")
+      < uninstallEditInstaller.indexOf("$finalHash = Get-ContentHash $entry.Path"),
+    "the race fixture must modify the owned Skill before its final uninstall hash check",
+  );
+
   const crash = await windowsHarness.createInstrumentedInstaller({
     sandbox,
     sourceRoot,
@@ -409,6 +513,16 @@ test("failure instrumentation modifies only an isolated minimal installer source
 
 test("Windows smoke uses isolated Windows PowerShell 5.1 to install", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
+  const understandSkill = path.join(
+    sandbox.homeDir,
+    ".agents",
+    "skills",
+    "understand",
+    "SKILL.md",
+  );
+  const understandSkillContent = "# Understand-Anything\n";
+  await mkdir(path.dirname(understandSkill), { recursive: true });
+  await writeFile(understandSkill, understandSkillContent, "utf8");
   const result = await runInstaller({ installerPath, sandbox });
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT;
   const expectedPowerShell = path.join(
@@ -451,6 +565,7 @@ test("Windows smoke uses isolated Windows PowerShell 5.1 to install", { skip: wi
   assert.equal(ownedFiles.get("agent-skill").sha256, await sha256(skillTarget));
   assert.equal(ownedFiles.get("agent-skill").sha256, await sha256(sourceSkillPath));
   assert.equal(await pathExists(toolDir), false);
+  assert.equal(await readFile(understandSkill, "utf8"), understandSkillContent);
   assert.equal(
     await sha256(path.join(runtimeDir, "bin", "legacy-code-atlas.mjs")),
     await sha256(sourceCliPath),
@@ -545,6 +660,139 @@ test("Windows migrates matching v2 files and retires its owned tool", { skip: wi
     await sha256(sourceCliPath),
   );
   await assertNoTransactionArtifacts(sandbox);
+});
+
+for (const version of [2, 3]) {
+  test(`Windows migrates a released v${version} understand Skill to atlas`, { skip: windowsOnly }, async (t) => {
+    const sandbox = await createWindowsInstallerSandbox(t);
+    const fixture = version === 2
+      ? await windowsHarness.createV2Install(sandbox, {
+        skillName: "understand",
+        skillContent: "# Released pre-rename v2 Skill\n",
+        toolContent: "export const releasedPreRenameV2Tool = true;\n",
+      })
+      : await createV3Install(sandbox, {
+        skillName: "understand",
+        skillContent: "# Released pre-rename v3 Skill\n",
+      });
+    const atlasSkill = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
+
+    await runInstaller({ installerPath, sandbox });
+
+    const manifest = await readJson(fixture.ownerMarker);
+    assert.equal(await pathExists(fixture.skillTarget), false);
+    assert.equal(await pathExists(path.dirname(fixture.skillTarget)), false);
+    assert.equal(await sha256(atlasSkill), await sha256(sourceSkillPath));
+    assert.equal(
+      path.normalize(manifest.ownedFiles.find((entry) => entry.kind === "agent-skill").path),
+      path.normalize(atlasSkill),
+    );
+    if (version === 2) assert.equal(await pathExists(fixture.toolTarget), false);
+    await assertNoTransactionArtifacts(sandbox);
+  });
+
+  test(`Windows rejects a modified released v${version} understand Skill`, { skip: windowsOnly }, async (t) => {
+    const sandbox = await createWindowsInstallerSandbox(t);
+    const fixture = version === 2
+      ? await windowsHarness.createV2Install(sandbox, { skillName: "understand" })
+      : await createV3Install(sandbox, { skillName: "understand" });
+    await writeFile(fixture.skillTarget, `# User-modified pre-rename v${version} Skill\n`, "utf8");
+
+    await assertInstallerRejectsWithUnchangedState({
+      sandbox,
+      message: /已被修改[^\r\n]*拒绝/,
+    });
+  });
+
+  test(`Windows v${version} understand migration rejects an occupied foreign atlas namespace`, { skip: windowsOnly }, async (t) => {
+    const sandbox = await createWindowsInstallerSandbox(t);
+    if (version === 2) {
+      await windowsHarness.createV2Install(sandbox, { skillName: "understand" });
+    } else {
+      await createV3Install(sandbox, { skillName: "understand" });
+    }
+    const foreignAtlasSkill = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
+    await mkdir(path.dirname(foreignAtlasSkill), { recursive: true });
+    await writeFile(foreignAtlasSkill, "# Foreign Atlas Skill\n", "utf8");
+
+    await assertInstallerRejectsWithUnchangedState({
+      sandbox,
+      message: atlasSkillCollisionMessage,
+    });
+  });
+
+  test(`Windows uninstalls an unchanged released v${version} understand Skill`, { skip: windowsOnly }, async (t) => {
+    const sandbox = await createWindowsInstallerSandbox(t);
+    const fixture = version === 2
+      ? await windowsHarness.createV2Install(sandbox, { skillName: "understand" })
+      : await createV3Install(sandbox, { skillName: "understand" });
+    const sharedSkill = path.join(sandbox.homeDir, ".agents", "skills", "keep-skill", "SKILL.md");
+    await mkdir(path.dirname(sharedSkill), { recursive: true });
+    await writeFile(sharedSkill, "# Keep shared Skill\n", "utf8");
+
+    await runInstaller({ installerPath, sandbox, args: ["-Uninstall"] });
+
+    assert.equal(await pathExists(fixture.installDir), false);
+    assert.equal(await pathExists(fixture.skillTarget), false);
+    assert.equal(await pathExists(path.dirname(fixture.skillTarget)), false);
+    assert.equal(await readFile(sharedSkill, "utf8"), "# Keep shared Skill\n");
+    if (version === 2) assert.equal(await pathExists(fixture.toolTarget), false);
+  });
+
+  test(`Windows v${version} understand uninstall ignores a foreign atlas junction`, { skip: windowsOnly }, async (t) => {
+    const sandbox = await createWindowsInstallerSandbox(t);
+    const fixture = version === 2
+      ? await windowsHarness.createV2Install(sandbox, { skillName: "understand" })
+      : await createV3Install(sandbox, { skillName: "understand" });
+    const outside = path.join(sandbox.root, "foreign-atlas-skill");
+    const atlasSkillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
+    await mkdir(outside, { recursive: true });
+    await mkdir(path.dirname(atlasSkillDir), { recursive: true });
+    await writeFile(path.join(outside, "SKILL.md"), "# Foreign Atlas Skill\n", "utf8");
+    await windowsHarness.createDirectoryJunction({ target: outside, junction: atlasSkillDir });
+
+    await runInstaller({ installerPath, sandbox, args: ["-Uninstall"] });
+
+    assert.equal(await pathExists(fixture.installDir), false);
+    assert.equal(await pathExists(fixture.skillTarget), false);
+    assert.equal(await readFile(path.join(outside, "SKILL.md"), "utf8"), "# Foreign Atlas Skill\n");
+    assert.equal(await readFile(path.join(atlasSkillDir, "SKILL.md"), "utf8"), "# Foreign Atlas Skill\n");
+    if (version === 2) assert.equal(await pathExists(fixture.toolTarget), false);
+  });
+}
+
+test("Windows understand migration preserves siblings in the retired Skill directory", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, { skillName: "understand" });
+  const sibling = path.join(path.dirname(fixture.skillTarget), "company-notes.txt");
+  await writeFile(sibling, "keep legacy namespace sibling\n", "utf8");
+
+  await runInstaller({ installerPath, sandbox });
+
+  assert.equal(await pathExists(fixture.skillTarget), false);
+  assert.equal(await readFile(sibling, "utf8"), "keep legacy namespace sibling\n");
+  assert.equal(await pathExists(path.dirname(fixture.skillTarget)), true);
+});
+
+test("Windows understand migration rejects a junction without following it", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, {
+    skillName: "understand",
+    omitSkillDir: true,
+    omitSkill: true,
+  });
+  const outside = path.join(sandbox.root, "outside-understand-skill");
+  const legacySkillDir = path.dirname(fixture.skillTarget);
+  await mkdir(outside, { recursive: true });
+  await mkdir(path.dirname(legacySkillDir), { recursive: true });
+  await writeFile(path.join(outside, "SKILL.md"), "# Outside Skill\n", "utf8");
+  await windowsHarness.createDirectoryJunction({ target: outside, junction: legacySkillDir });
+
+  await assertInstallerRejectsWithUnchangedState({
+    sandbox,
+    message: /重解析点|reparse point/i,
+  });
+  assert.equal(await readFile(path.join(outside, "SKILL.md"), "utf8"), "# Outside Skill\n");
 });
 
 test("Windows preserves and rejects an unowned duplicate tool in another config directory", { skip: windowsOnly }, async (t) => {
@@ -652,6 +900,45 @@ test("Windows v3 update rejects a modified owned Skill without changing state", 
   });
 });
 
+test("Windows v3 update preserves a Skill modified after preflight before replacement", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, {
+    skillContent: "# Original owned v3 Skill\n",
+    runtimeContent: "original v3 runtime\n",
+  });
+  const manifestBefore = await readFile(fixture.ownerMarker);
+  const instrumented = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "before-skill-replace",
+    action: "modify-skill",
+  });
+
+  await assert.rejects(
+    runInstaller({ installerPath: instrumented.installerPath, sandbox }),
+    (error) => {
+      assert.equal(error.powerShellMajorVersion, 5);
+      assert.equal(error.powerShellMinorVersion, 1);
+      assert.match(
+        `${error.message}\n${error.stderr ?? ""}`,
+        /Agent Skill[^\r\n]*预检后[^\r\n]*改变[^\r\n]*拒绝覆盖/,
+      );
+      return true;
+    },
+  );
+
+  assert.equal(
+    await readFile(fixture.skillTarget, "utf8"),
+    windowsHarness.skillModifiedAfterPreflightContent,
+  );
+  assert.deepEqual(await readFile(fixture.ownerMarker), manifestBefore);
+  assert.equal(
+    await readFile(path.join(fixture.installDir, "runtime-sentinel.txt"), "utf8"),
+    "original v3 runtime\n",
+  );
+  await assertNoTransactionArtifacts(sandbox);
+});
+
 test("Windows fresh install rejects an unowned atlas Skill namespace without changing state", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
   const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
@@ -664,16 +951,26 @@ test("Windows fresh install rejects an unowned atlas Skill namespace without cha
   });
 });
 
-test("Windows fresh install rejects a shadowing legacy command without changing state", { skip: windowsOnly }, async (t) => {
-  const sandbox = await createWindowsInstallerSandbox(t);
-  const legacyCommand = path.join(sandbox.configDir, "commands", "understand.md");
-  await mkdir(path.dirname(legacyCommand), { recursive: true });
-  await writeFile(legacyCommand, "# Unowned legacy command\n", "utf8");
+test("Windows fresh install preserves and rejects orphaned legacy integrations", { skip: windowsOnly }, async (t) => {
+  for (const kind of ["skill", "command"]) {
+    const sandbox = await createWindowsInstallerSandbox(t, {
+      prefix: `legacy-atlas-orphan-${kind}-`,
+    });
+    const target = kind === "skill"
+      ? path.join(sandbox.homeDir, ".agents", "skills", "understand", "SKILL.md")
+      : path.join(sandbox.configDir, "commands", "understand.md");
+    const content = kind === "skill"
+      ? '# Old Atlas Skill\nnode "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" analyze "$PWD"\n'
+      : "# Unowned legacy command\n";
+    const message = kind === "skill"
+      ? /无有效 ownership manifest[\s\S]*旧 Atlas[\s\S]*understand[\s\S]*保留文件并停止/i
+      : /commands[\\/]understand[.]md[\s\S]*保留[\s\S]*停止/i;
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, content, "utf8");
 
-  await assertInstallerRejectsWithUnchangedState({
-    sandbox,
-    message: /commands[\\/]understand[.]md[\s\S]*保留[\s\S]*停止/i,
-  });
+    await assertInstallerRejectsWithUnchangedState({ sandbox, message });
+    assert.equal(await readFile(target, "utf8"), content);
+  }
 });
 
 test("Windows fresh install preserves and rejects an unowned legacy tool", { skip: windowsOnly }, async (t) => {
@@ -1063,6 +1360,127 @@ test("Windows recovers a pre-commit transaction-v1 journal before running the v3
   await assertNoTransactionArtifacts(sandbox);
 });
 
+test("Windows recovers a pre-rename understand transaction-v1 journal", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await windowsHarness.createV2Install(sandbox, {
+    skillName: "understand",
+    skillContent: "# Original understand Skill before transaction-v1 crash\n",
+    toolContent: "export const originalUnderstandToolV1 = true;\n",
+  });
+  const before = await snapshotInstallerState(sandbox);
+  const id = "33333333333333333333333333333333";
+  const paths = legacyV1TransactionPaths({
+    sandbox,
+    configDir: sandbox.configDir,
+    id,
+    skillName: "understand",
+  });
+
+  await rename(fixture.installDir, paths.runtimeBackup);
+  await mkdir(fixture.installDir, { recursive: true });
+  await rename(fixture.skillTarget, paths.skillBackup);
+  await rename(fixture.toolTarget, paths.toolBackup);
+  await Promise.all([
+    writeFile(fixture.skillTarget, await readFile(sourceSkillPath)),
+    writeFile(fixture.toolTarget, "export {};\n", "utf8"),
+    writeFile(
+      paths.manifestTemp,
+      `\uFEFF${JSON.stringify({ owner: "legacy-code-atlas-install-v2", version: 2 })}`,
+      "utf8",
+    ),
+  ]);
+  await writeLegacyV1TransactionJournal({
+    sandbox,
+    configDir: sandbox.configDir,
+    id,
+    manifestSha256: await sha256(paths.manifestTemp),
+    skillSha256: await sha256(fixture.skillTarget),
+    toolSha256: await sha256(fixture.toolTarget),
+    skillName: "understand",
+  });
+
+  const recoveryOnly = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "after-recovery",
+    action: "throw",
+  });
+  await assertInstrumentedFailure({
+    instrumentedInstallerPath: recoveryOnly.installerPath,
+    sandbox,
+    message: /LEGACY_CODE_ATLAS_TEST_FAILPOINT:after-recovery:throw/,
+  });
+
+  const instrumentedRoot = path.relative(sandbox.root, recoveryOnly.sourceRoot)
+    .split(path.sep)
+    .join("/");
+  const after = (await snapshotInstallerState(sandbox)).filter(
+    (entry) => !entry.path.startsWith(instrumentedRoot),
+  );
+  assert.deepEqual(after, before);
+  assert.equal(await sha256(fixture.skillTarget), fixture.skillHash);
+  assert.equal(await sha256(fixture.toolTarget), fixture.toolHash);
+  await assertNoTransactionArtifacts(sandbox);
+});
+
+test("Windows recovers a pre-rename understand transaction-v2 journal", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, {
+    skillName: "understand",
+    skillContent: "# Original understand Skill before transaction-v2 crash\n",
+  });
+  const before = await snapshotInstallerState(sandbox);
+  const id = "44444444444444444444444444444444";
+  const paths = legacyV2TransactionPaths({
+    sandbox,
+    configDir: sandbox.configDir,
+    id,
+    skillName: "understand",
+  });
+
+  await rename(fixture.installDir, paths.runtimeBackup);
+  await mkdir(fixture.installDir, { recursive: true });
+  await rename(fixture.skillTarget, paths.skillBackup);
+  await Promise.all([
+    writeFile(fixture.skillTarget, await readFile(sourceSkillPath)),
+    writeFile(
+      paths.manifestTemp,
+      `\uFEFF${JSON.stringify({ owner: "legacy-code-atlas-install-v3", version: 3 })}`,
+      "utf8",
+    ),
+  ]);
+  await writeLegacyV2TransactionJournal({
+    sandbox,
+    configDir: sandbox.configDir,
+    id,
+    manifestSha256: await sha256(paths.manifestTemp),
+    skillSha256: await sha256(fixture.skillTarget),
+    skillName: "understand",
+  });
+
+  const recoveryOnly = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "after-recovery",
+    action: "throw",
+  });
+  await assertInstrumentedFailure({
+    instrumentedInstallerPath: recoveryOnly.installerPath,
+    sandbox,
+    message: /LEGACY_CODE_ATLAS_TEST_FAILPOINT:after-recovery:throw/,
+  });
+
+  const instrumentedRoot = path.relative(sandbox.root, recoveryOnly.sourceRoot)
+    .split(path.sep)
+    .join("/");
+  const after = (await snapshotInstallerState(sandbox)).filter(
+    (entry) => !entry.path.startsWith(instrumentedRoot),
+  );
+  assert.deepEqual(after, before);
+  assert.equal(await sha256(fixture.skillTarget), fixture.skillHash);
+  await assertNoTransactionArtifacts(sandbox);
+});
+
 test("Windows completes post-commit cleanup for a transaction-v1 journal", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
   const fixture = await windowsHarness.createV2Install(sandbox);
@@ -1160,6 +1578,92 @@ test("Windows next launch restores a retired v2 tool after a crash before manife
   await runInstaller({ installerPath, sandbox });
   assert.equal(await pathExists(fixture.toolTarget), false);
   assert.equal((await readJson(fixture.ownerMarker)).version, 3);
+});
+
+test("Windows restores a retired understand Skill after a crash before manifest commit", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, {
+    skillName: "understand",
+    skillContent: "# Old understand Skill before migration crash\n",
+  });
+  const before = await snapshotInstallerState(sandbox);
+  const crashing = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "after-legacy-skill",
+    action: "crash",
+  });
+
+  await assert.rejects(
+    runInstaller({ installerPath: crashing.installerPath, sandbox }),
+    (error) => error.powerShellMajorVersion === 5 && error.powerShellMinorVersion === 1,
+  );
+  const journalPath = path.join(sandbox.homeDir, ".legacy-code-atlas.transaction.json");
+  const journal = await readJson(journalPath);
+  assert.equal(await pathExists(fixture.skillTarget), false);
+  assert.equal(await pathExists(journal.legacySkillBackup), true);
+
+  const recoveryOnly = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "after-recovery",
+    action: "throw",
+  });
+  await assertInstrumentedFailure({
+    instrumentedInstallerPath: recoveryOnly.installerPath,
+    sandbox,
+    message: /LEGACY_CODE_ATLAS_TEST_FAILPOINT:after-recovery:throw/,
+  });
+
+  const instrumentedRoots = [crashing.sourceRoot, recoveryOnly.sourceRoot].map((root) => (
+    path.relative(sandbox.root, root).split(path.sep).join("/")
+  ));
+  const after = (await snapshotInstallerState(sandbox)).filter(
+    (entry) => !instrumentedRoots.some((root) => entry.path.startsWith(root)),
+  );
+  assert.deepEqual(after, before);
+  assert.equal(await sha256(fixture.skillTarget), fixture.skillHash);
+  await assertNoTransactionArtifacts(sandbox);
+});
+
+test("Windows completes understand retirement after a crash following manifest commit", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, {
+    skillName: "understand",
+    skillContent: "# Old understand Skill before committed migration crash\n",
+  });
+  const crashing = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "after-manifest",
+    action: "crash",
+  });
+
+  await assert.rejects(
+    runInstaller({ installerPath: crashing.installerPath, sandbox }),
+    (error) => error.powerShellMajorVersion === 5 && error.powerShellMinorVersion === 1,
+  );
+  assert.equal(await pathExists(fixture.skillTarget), false);
+
+  const recoveryOnly = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "after-recovery",
+    action: "throw",
+  });
+  await assertInstrumentedFailure({
+    instrumentedInstallerPath: recoveryOnly.installerPath,
+    sandbox,
+    message: /LEGACY_CODE_ATLAS_TEST_FAILPOINT:after-recovery:throw/,
+  });
+
+  const atlasSkill = path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md");
+  const manifest = await readJson(fixture.ownerMarker);
+  assert.equal(manifest.version, 3);
+  assert.equal(await sha256(atlasSkill), await sha256(sourceSkillPath));
+  assert.equal(await pathExists(fixture.skillTarget), false);
+  assert.equal(await pathExists(path.dirname(fixture.skillTarget)), false);
+  await assertNoTransactionArtifacts(sandbox);
 });
 
 test("Windows crash before staged Skill copy never creates the final Skill namespace", { skip: windowsOnly }, async (t) => {
@@ -1414,6 +1918,31 @@ test("Windows v3 uninstall preserves a matching Skill namespace that contains an
   assert.equal(await readFile(sibling, "utf8"), "keep namespace sibling\n");
   assert.equal(await pathExists(fixture.skillDir), true);
   assert.equal(await pathExists(path.join(sandbox.homeDir, ".agents", "skills")), true);
+});
+
+test("Windows v3 uninstall preserves a Skill modified immediately before deletion", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox);
+  const instrumented = await windowsHarness.createInstrumentedInstaller({
+    sandbox,
+    sourceRoot,
+    phase: "before-uninstall-final-hash",
+    action: "modify-skill",
+  });
+
+  await runInstaller({
+    installerPath: instrumented.installerPath,
+    sandbox,
+    args: ["-Uninstall"],
+  });
+
+  assert.equal(
+    await readFile(fixture.skillTarget, "utf8"),
+    windowsHarness.skillModifiedAfterPreflightContent,
+  );
+  assert.equal(await pathExists(fixture.installDir), false);
+  assert.equal(await pathExists(fixture.skillDir), true);
+  await assertNoTransactionArtifacts(sandbox);
 });
 
 test("Windows installs, updates, uninstalls, and freshly reinstalls inside a non-ASCII path", { skip: windowsOnly }, async (t) => {

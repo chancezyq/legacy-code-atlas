@@ -3,6 +3,7 @@ import path from "node:path";
 import { GraphBuilder } from "./graph.mjs";
 import { normalizeRequestUrl, webPathForFile } from "./parsers/jsp.mjs";
 import { resolveFacts } from "./resolver.mjs";
+import { effectiveTilePages } from "./tile-composition.mjs";
 
 function fileNode(graph, file) {
   return graph.addNode({
@@ -27,23 +28,154 @@ function addRoute(graph, ownerNode, request, edgeType) {
     evidence: [request.evidence],
     searchText: [request.url, request.kind ?? request.source ?? ""],
   });
-  if (request.method || request.parameters) {
+  if (Object.hasOwn(request, "method") || Object.hasOwn(request, "parameters")) {
     const hint = {
       method: request.method ?? "",
       parameters: request.parameters ?? {},
       evidence: request.evidence,
+      ...(typeof request.parametersComplete === "boolean"
+        ? { parametersComplete: request.parametersComplete }
+        : {}),
     };
     graph.addNodeDataItem(route, "requestHints", hint);
   }
-  graph.addEdge({
+  const edge = graph.addEdge({
     source: ownerNode.id,
     target: route.id,
     type: edgeType,
     confidence: 1,
     reason: request.kind ? `${request.kind} request` : request.source,
     evidence: [request.evidence],
+    data: request.contextPageId ? { pageIds: [request.contextPageId] } : {},
   });
+  if (request.contextPageId) {
+    edge.data.pageIds = [...new Set([...(edge.data.pageIds ?? []), request.contextPageId])]
+      .sort((left, right) => left.localeCompare(right, "en"));
+    const contexts = Array.isArray(edge.data.requestContexts) ? edge.data.requestContexts : [];
+    let context = contexts.find((candidate) => candidate.file === request.evidence.file
+      && candidate.line === request.evidence.line
+      && candidate.column === request.evidence.column);
+    if (!context) {
+      context = {
+        file: request.evidence.file,
+        line: request.evidence.line,
+        column: request.evidence.column,
+        pageIds: [],
+      };
+      contexts.push(context);
+    }
+    context.pageIds = [...new Set([...context.pageIds, request.contextPageId])]
+      .sort((left, right) => left.localeCompare(right, "en"));
+    edge.data.requestContexts = contexts.sort((left, right) => (
+      left.file.localeCompare(right.file, "en")
+      || left.line - right.line
+      || left.column - right.column
+    ));
+  }
+  graph.addEdgeEvidence(edge, [request.evidence]);
   return route;
+}
+
+const ARRIVAL_EDGE_TYPES = new Set([
+  "forwards_to",
+  "redirects_to",
+  "uses_tile",
+  "includes",
+]);
+
+function addPageContext(contextsByPage, pageId, context) {
+  const contexts = contextsByPage.get(pageId) ?? new Map();
+  const key = `${context.routeUrl}\0${context.topPageId}`;
+  if (!contexts.has(key)) contexts.set(key, context);
+  contextsByPage.set(pageId, contexts);
+}
+
+function propagateArrivalContexts(graph, seeds, contextsByPage, allowedEdgeTypes = ARRIVAL_EDGE_TYPES) {
+  const outgoingBySource = new Map();
+  for (const edge of [...graph.edges.values()].sort((left, right) => left.id.localeCompare(right.id, "en"))) {
+    const outgoing = outgoingBySource.get(edge.source) ?? [];
+    outgoing.push(edge);
+    outgoingBySource.set(edge.source, outgoing);
+  }
+  const queue = [...seeds];
+  const visited = new Set();
+  for (let index = 0; index < queue.length; index += 1) {
+    const current = queue[index];
+    const visitKey = `${current.nodeId}\0${current.routeUrl}\0${current.topPageId}`;
+    if (visited.has(visitKey)) continue;
+    visited.add(visitKey);
+
+    const node = graph.nodes.get(current.nodeId);
+    if (!node) continue;
+    const topPageId = node.type === "page" ? current.topPageId || node.id : current.topPageId;
+    if (node.type === "page") {
+      addPageContext(contextsByPage, node.id, { routeUrl: current.routeUrl, topPageId });
+    }
+    for (const edge of outgoingBySource.get(node.id) ?? []) {
+      if (!allowedEdgeTypes.has(edge.type)) continue;
+      const target = graph.nodes.get(edge.target);
+      if (!target) continue;
+      if (edge.type === "uses_tile" && target.type === "tiles_definition") {
+        for (const composition of effectiveTilePages(target.id, graph.nodes, outgoingBySource)) {
+          queue.push({
+            nodeId: composition.node.id,
+            routeUrl: current.routeUrl,
+            topPageId,
+          });
+        }
+        continue;
+      }
+      queue.push({
+        nodeId: target.id,
+        routeUrl: edge.type === "redirects_to" && target.type === "route"
+          ? target.name
+          : current.routeUrl,
+        topPageId: edge.type === "redirects_to" ? "" : topPageId,
+      });
+    }
+  }
+}
+
+function pageArrivalContexts(graph) {
+  const contextsByPage = new Map();
+  const routeSeeds = [...graph.nodes.values()]
+    .filter((node) => node.type === "route")
+    .sort((left, right) => left.id.localeCompare(right.id, "en"))
+    .map((route) => ({ nodeId: route.id, routeUrl: route.name, topPageId: "" }));
+  propagateArrivalContexts(graph, routeSeeds, contextsByPage);
+
+  const pages = [...graph.nodes.values()]
+    .filter((node) => node.type === "page")
+    .sort((left, right) => left.id.localeCompare(right.id, "en"));
+  const includedPageIds = new Set(
+    [...graph.edges.values()].filter((edge) => edge.type === "includes").map((edge) => edge.target),
+  );
+  const fallbackRoots = pages.filter((page) => !contextsByPage.has(page.id) && !includedPageIds.has(page.id));
+  propagateArrivalContexts(
+    graph,
+    fallbackRoots.map((page) => ({
+      nodeId: page.id,
+      routeUrl: webPathForFile(page.filePath ?? page.name),
+      topPageId: page.id,
+    })),
+    contextsByPage,
+    new Set(["includes"]),
+  );
+  for (const page of pages) {
+    if (contextsByPage.has(page.id)) continue;
+    propagateArrivalContexts(graph, [{
+      nodeId: page.id,
+      routeUrl: webPathForFile(page.filePath ?? page.name),
+      topPageId: page.id,
+    }], contextsByPage, new Set(["includes"]));
+  }
+  return new Map([...contextsByPage].map(([pageId, contexts]) => [
+    pageId,
+    [...contexts.values()].sort((left, right) => (
+      left.routeUrl.localeCompare(right.routeUrl, "en")
+      || left.topPageId.localeCompare(right.topPageId, "en")
+    )),
+  ]));
 }
 
 function methodRecord(graph, type, method, disambiguateSignature = false) {
@@ -78,8 +210,12 @@ function canonicalStruts2Request(request, struts2RoutesByName) {
   return urls.length === 1 ? { ...request, url: urls[0] } : request;
 }
 
-function materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, sourceFileByWebPath, struts2RoutesByName) {
+function materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, pendingJspPages) {
   const parsed = record.facts;
+  const formCount = Number.isInteger(parsed.formCount)
+    ? parsed.formCount
+    : parsed.requests.filter((request) => request.kind === "form").length;
+  const preserveLegacySingleForm = formCount === 1 && !(parsed.unassignedFieldCount > 0);
   const page = graph.addNode({
     type: "page",
     key: file.path,
@@ -90,16 +226,15 @@ function materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, sour
     data: { visibleText: parsed.visibleText, fields: parsed.fields.map((field) => field.name) },
   });
   graph.addEdge({ source: sourceFile.id, target: page.id, type: "contains", confidence: 1, reason: "JSP page" });
-  for (const request of parsed.requests) {
-    const edgeType = request.kind === "form" ? "submits_to" : request.kind === "link" ? "links_to" : "requests";
-    addRoute(graph, page, canonicalStruts2Request(request, struts2RoutesByName), edgeType);
-  }
   for (const include of parsed.includes) {
     const includeWebPath = normalizeRequestUrl(include.path, webPathForFile(file.path));
+    if (!includeWebPath) continue;
     const realPagePath = pageFileByWebPath.get(includeWebPath) ?? "";
+    const includedPageKey = realPagePath || includeWebPath.replace(/^\//, "");
+    if (!includedPageKey) continue;
     const includedPage = graph.addNode({
       type: "page",
-      key: realPagePath || includeWebPath.replace(/^\//, ""),
+      key: includedPageKey,
       name: realPagePath ? path.posix.basename(realPagePath) : include.path,
       ...(realPagePath ? { filePath: realPagePath } : {}),
       evidence: [include.evidence],
@@ -114,21 +249,115 @@ function materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, sour
       evidence: [include.evidence],
     });
   }
-  for (const script of parsed.scripts) {
-    const targetFile = sourceFileByWebPath.get(script.path);
-    if (!targetFile) {
-      graph.addWarning(`unresolved JSP script: ${script.path} at ${script.evidence.file}:${script.evidence.line}`);
+  pendingJspPages.push({ page, requests: parsed.requests, scripts: parsed.scripts, preserveLegacySingleForm });
+}
+
+function queryParameterNames(request) {
+  if (Array.isArray(request.queryParameterNames)) {
+    return new Set(request.queryParameterNames.filter((name) => typeof name === "string" && name));
+  }
+  let target = Object.hasOwn(request, "relativeUrl") ? request.relativeUrl : "";
+  if (!target.includes("?") && typeof request.evidence?.snippet === "string") {
+    target = request.evidence.snippet;
+  }
+  const queryOffset = target.indexOf("?");
+  if (queryOffset === -1) return new Set();
+  const query = target.slice(queryOffset + 1).split(/["'<>\s#]/u, 1)[0].replace(/&amp;/giu, "&");
+  return new Set([...new URLSearchParams(query).keys()].filter(Boolean));
+}
+
+function materializedJspRequest(request, preserveLegacySingleForm) {
+  if (request.kind !== "form") return request;
+  if (!preserveLegacySingleForm) return { ...request, parametersComplete: true };
+  const explicitQueryNames = queryParameterNames(request);
+  const hasEmptyExplicitQueryParameter = [...explicitQueryNames].some(
+    (name) => request.parameters?.[name] === "",
+  );
+  return {
+    ...request,
+    parameters: Object.fromEntries(
+      Object.entries(request.parameters ?? {}).filter(([name, value]) => value !== "" || explicitQueryNames.has(name)),
+    ),
+    ...(hasEmptyExplicitQueryParameter ? { parametersComplete: false } : {}),
+  };
+}
+
+function materializeJspRequests(graph, pendingJspPages, contextsByPage, struts2RoutesByName) {
+  for (const { page, requests, preserveLegacySingleForm } of pendingJspPages) {
+    const contexts = contextsByPage.get(page.id) ?? [];
+    for (const originalRequest of requests) {
+      const request = materializedJspRequest(originalRequest, preserveLegacySingleForm);
+      const edgeType = request.kind === "form" ? "submits_to" : request.kind === "link" ? "links_to" : "requests";
+      const relative = Object.hasOwn(request, "relativeUrl");
+      const targets = relative ? contexts : [{ routeUrl: request.url, topPageId: page.id }];
+      for (const context of targets) {
+        const owner = graph.nodes.get(context.topPageId) ?? page;
+        const url = relative ? normalizeRequestUrl(request.relativeUrl, context.routeUrl) : request.url;
+        if (!url) continue;
+        addRoute(graph, owner, canonicalStruts2Request({ ...request, url }, struts2RoutesByName), edgeType);
+      }
+    }
+  }
+}
+
+function materializeJspScripts(graph, pendingJspPages, contextsByPage, sourceFileByWebPath) {
+  const loadingContextsByScript = new Map();
+  for (const { page, scripts } of pendingJspPages) {
+    for (const script of scripts) {
+      const contexts = contextsByPage.get(page.id) ?? [];
+      for (const context of contexts) {
+        const scriptWebPath = Object.hasOwn(script, "relativePath")
+          ? normalizeRequestUrl(script.relativePath, context.routeUrl)
+          : script.path;
+        const targetFile = sourceFileByWebPath.get(scriptWebPath);
+        if (!targetFile) {
+          graph.addWarning(`unresolved JSP script: ${scriptWebPath || script.path} at ${script.evidence.file}:${script.evidence.line}`);
+          continue;
+        }
+        const topPage = graph.nodes.get(context.topPageId) ?? page;
+        const scriptFile = fileNode(graph, targetFile);
+        graph.addEdge({
+          source: topPage.id,
+          target: scriptFile.id,
+          type: "loads_script",
+          confidence: 1,
+          reason: "JSP script src",
+          evidence: [script.evidence],
+        });
+        const loadingContexts = loadingContextsByScript.get(scriptFile.id) ?? new Map();
+        const key = `${context.routeUrl}\0${topPage.id}`;
+        loadingContexts.set(key, { routeUrl: context.routeUrl, page: topPage });
+        loadingContextsByScript.set(scriptFile.id, loadingContexts);
+      }
+    }
+  }
+  return loadingContextsByScript;
+}
+
+function materializeJavaScriptRequests(graph, pendingRequests, loadingContextsByScript, struts2RoutesByName) {
+  for (const { sourceFile, request } of pendingRequests) {
+    const loadingContexts = [...(loadingContextsByScript.get(sourceFile.id)?.values() ?? [])];
+    if (!Object.hasOwn(request, "relativeUrl")) {
+      const canonical = canonicalStruts2Request(request, struts2RoutesByName);
+      addRoute(graph, sourceFile, canonical, "requests");
       continue;
     }
-    const scriptFile = fileNode(graph, targetFile);
-    graph.addEdge({
-      source: page.id,
-      target: scriptFile.id,
-      type: "loads_script",
-      confidence: 1,
-      reason: "JSP script src",
-      evidence: [script.evidence],
-    });
+    if (loadingContexts.length === 0) {
+      graph.addWarning(
+        `unresolved relative JavaScript request: ${request.relativeUrl} at ${request.evidence.file}:${request.evidence.line}`,
+      );
+      continue;
+    }
+    for (const { routeUrl, page } of loadingContexts) {
+      const url = normalizeRequestUrl(request.relativeUrl, routeUrl);
+      if (!url) continue;
+      const canonical = canonicalStruts2Request({
+        ...request,
+        url,
+        contextPageId: page.id,
+      }, struts2RoutesByName);
+      addRoute(graph, sourceFile, canonical, "requests");
+    }
   }
 }
 
@@ -393,6 +622,8 @@ export function materializeRecords({ projectRoot, records, skipped = [] }) {
     files.filter((file) => ["jsp", "javascript"].includes(file.language)).map((file) => [webPathForFile(file.path), file]),
   );
   const struts2RoutesByName = new Map();
+  const pendingJspPages = [];
+  const javaScriptRequests = [];
   for (const action of ordered
     .filter((record) => record.status === "parsed" && record.parserKind === "xml")
     .flatMap((record) => record.facts.struts2?.actions ?? [])) {
@@ -419,9 +650,9 @@ export function materializeRecords({ projectRoot, records, skipped = [] }) {
     if (record.status !== "parsed") continue;
 
     if (record.parserKind === "jsp") {
-      materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, sourceFileByWebPath, struts2RoutesByName);
+      materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, pendingJspPages);
     } else if (record.parserKind === "javascript") {
-      for (const request of record.facts.requests) addRoute(graph, sourceFile, request, "requests");
+      for (const request of record.facts.requests) javaScriptRequests.push({ sourceFile, request });
     } else if (record.parserKind === "java") {
       materializeJava(graph, record, file, sourceFile, resolverFacts);
     } else if (record.parserKind === "xml") {
@@ -431,6 +662,23 @@ export function materializeRecords({ projectRoot, records, skipped = [] }) {
     }
   }
 
+  // Discover arrivals on the resolved graph, then rebuild resolver edges after browser hints exist.
+  const preResolutionEdgeIds = new Set(graph.edges.keys());
+  const preResolutionWarningCount = graph.warnings.length;
+  resolveFacts(graph, resolverFacts);
+  const contextsByPage = pageArrivalContexts(graph);
+  for (const edgeId of graph.edges.keys()) {
+    if (!preResolutionEdgeIds.has(edgeId)) graph.edges.delete(edgeId);
+  }
+  graph.warnings.length = preResolutionWarningCount;
+  materializeJspRequests(graph, pendingJspPages, contextsByPage, struts2RoutesByName);
+  const loadingContextsByScript = materializeJspScripts(
+    graph,
+    pendingJspPages,
+    contextsByPage,
+    sourceFileByWebPath,
+  );
+  materializeJavaScriptRequests(graph, javaScriptRequests, loadingContextsByScript, struts2RoutesByName);
   resolveFacts(graph, resolverFacts);
   return graph.toJSON();
 }

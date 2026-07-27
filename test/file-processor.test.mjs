@@ -29,6 +29,25 @@ function assertJsonSafe(value, forbidden = []) {
   for (const text of forbidden) assert.equal(serialized.includes(text), false);
 }
 
+test("JavaScript parser changes invalidate stale request-method cache records", async () => {
+  const buffer = Buffer.from("fetch('/dynamic.do', { method: verb });");
+  const file = source("web/app.js", "javascript", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.0.0";
+  staleRecord.facts.requests[0].method = "GET";
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.equal(result.record.facts.requests[0].method, "");
+});
+
 test("readAndProcessFile returns metadata facts without reading or stating the file", async () => {
   const file = source("docs/README.md", "markdown", "hello", { category: "docs" });
   let ioCalls = 0;

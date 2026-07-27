@@ -36,6 +36,19 @@ async function mutateStandardIndex(project, mutate) {
   await writeFile(indexPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
 }
 
+test("CLI checks serialized index size before allocating its output Buffer", async () => {
+  const source = await readFile(cli, "utf8");
+  const functionStart = source.indexOf("async function writeIndex");
+  const functionEnd = source.indexOf("\n}\n\nfunction safeDiagnosticMessage", functionStart);
+  const writeIndex = source.slice(functionStart, functionEnd);
+  const byteLengthCheck = writeIndex.indexOf("Buffer.byteLength(serialized)");
+  const bufferAllocation = writeIndex.indexOf("Buffer.from(serialized)");
+
+  assert.notEqual(byteLengthCheck, -1);
+  assert.notEqual(bufferAllocation, -1);
+  assert.ok(byteLengthCheck < bufferAllocation);
+});
+
 test("CLI help documents --query-file for every trace command", async () => {
   const help = await run(process.execPath, [cli, "--help"]);
 
@@ -507,6 +520,41 @@ test("CLI bounds logical query length and token count before loading the index",
     /控制字符/,
   );
   assert.equal(await readFile(path.join(atlasDirectory, "index.json"), "utf8"), "not-json");
+  await assert.rejects(access(path.join(atlasDirectory, "cache.json")), { code: "ENOENT" });
+});
+
+test("CLI rejects Unicode text controls before loading the index", async (t) => {
+  const project = await projectCopy(t);
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  const indexPath = path.join(atlasDirectory, "index.json");
+  const queryPath = path.join(atlasDirectory, "query.txt");
+  await mkdir(atlasDirectory, { recursive: true });
+  await writeFile(indexPath, "not-json", "utf8");
+
+  for (const query of [
+    "OrderAudit\u2028forged line",
+    "OrderAudit\u2029forged paragraph",
+    "OrderAudit\u202eforged direction",
+    "OrderAudit\n",
+    "OrderAudit\u2028",
+    "OrderAudit\u2029",
+    "OrderAudit\ufeff",
+  ]) {
+    await writeFile(queryPath, query, "utf8");
+    await assertCliError(
+      ["docs", project, "--query-file", queryPath, "--no-match-ok"],
+      /控制字符/,
+    );
+  }
+
+  for (const query of ["OrderAudit\n", "OrderAudit\u2028", "\ufeffOrderAudit"]) {
+    await assertCliError(
+      ["trace-feature", project, query],
+      /控制字符/,
+    );
+  }
+
+  assert.equal(await readFile(indexPath, "utf8"), "not-json");
   await assert.rejects(access(path.join(atlasDirectory, "cache.json")), { code: "ENOENT" });
 });
 

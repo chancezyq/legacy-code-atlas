@@ -5,7 +5,7 @@ description: Use when a user invokes /atlas by itself to index a JSP, Struts, Ja
 
 # Understand a Legacy Project
 
-This Skill is the `/atlas` entry point. It has no arguments. It uses the host Shell only for the fixed Shell commands below and keeps all analysis artifacts in the current project.
+This Skill supports exactly two slash invocations: `/atlas` with no arguments and `/atlas docs` with the literal `docs` token as its only argument. It uses the host Shell only for the fixed Shell commands below and keeps all analysis artifacts in the current project.
 
 ## Invocation gate
 

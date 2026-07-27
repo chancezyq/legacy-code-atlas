@@ -518,6 +518,26 @@ test("uninstall documentation distinguishes external owned files from the privat
   }
 });
 
+test("user documentation describes automatic pre-rename Skill migration", async () => {
+  const [readmeZh, readmeEn, guideZh, guideEn] = await Promise.all([
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(new URL("../README_EN.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/opencode.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/opencode-en.md", import.meta.url), "utf8"),
+  ]);
+
+  for (const document of [readmeZh, guideZh]) {
+    assert.match(document, /最新(?:版)?安装器[^。\n]*(?:manifest|ownership)[^。\n]*SHA-256[^。\n]*自动[^。\n]*迁移/i);
+    assert.match(document, /(?:修改|第三方|不属于)[^。\n]*(?:拒绝|停止)|atlas[^。\n]*(?:占用|冲突)[^。\n]*(?:拒绝|停止)/i);
+    assert.doesNotMatch(document, /先用当时下载的源码[^。\n]*install[.]ps1 -Uninstall/);
+  }
+  for (const document of [readmeEn, guideEn]) {
+    assert.match(document, /latest installer[^.\n]*(?:manifest|ownership)[^.\n]*SHA-256[^.\n]*automatically migrates/i);
+    assert.match(document, /modified|third-party|foreign[^.\n]*(?:refused|blocks|stops)|atlas namespace[^.\n]*(?:occupied|conflict)/i);
+    assert.doesNotMatch(document, /uninstall it first[^.\n]*older source download/i);
+  }
+});
+
 test("OpenCode recovery documentation uses one-file manifest v3 ownership", async () => {
   const docs = await readFile(new URL("../docs/opencode.md", import.meta.url), "utf8");
   const manifest = markdownSection(docs, "manifest v3");

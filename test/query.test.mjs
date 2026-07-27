@@ -280,6 +280,34 @@ test("path-count truncation is not reported as the traversal state limit", () =>
   assert.doesNotMatch(result.warnings.join("\n"), /5000[^\n]*(?:状态|state)|(?:状态|state)[^\n]*5000/i);
 });
 
+test("depth-limited traces report the exact truncation cause", () => {
+  const nodes = Array.from({ length: 17 }, (_, index) => ({
+    id: index === 0 ? "route:/deep.do" : `java_method:Deep#m${index}/0`,
+    type: index === 0 ? "route" : "java_method",
+    name: index === 0 ? "/deep.do" : `Deep.m${index}`,
+    evidence: [],
+    data: {},
+    searchText: [],
+  }));
+  const edges = nodes.slice(1).map((node, index) => ({
+    id: `edge:${index}`,
+    source: nodes[index].id,
+    target: node.id,
+    type: index === 0 ? "maps_to" : "calls",
+    confidence: 1,
+    evidence: [],
+    data: {},
+  }));
+
+  const result = traceUrl({ nodes, edges, warnings: [] }, "/deep.do");
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.depthLimitReached, true);
+  assert.equal(result.depthLimit, 14);
+  assert.equal(result.paths[0].truncated, true);
+  assert.match(result.warnings.join("\n"), /14[^\n]*(?:深度|depth)|(?:深度|depth)[^\n]*14/i);
+});
+
 test("Markdown renderer distinguishes proven and heuristic edges and cites source lines", async () => {
   const graph = await analyzeProject(projectRoot);
   const trace = traceFeature(graph, "订单审核");

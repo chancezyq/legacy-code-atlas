@@ -4,6 +4,7 @@ import { replaceUnsafeTextControls } from "./text-safety.mjs";
 
 const SEARCH_TEXT_CHUNK_OVERLAP_CHARACTERS = 2 * 1024;
 const nodeStates = new WeakMap();
+const edgeStates = new WeakMap();
 const observableByTarget = new WeakMap();
 const observableByProxy = new WeakMap();
 const dataItemOrigins = new WeakMap();
@@ -197,6 +198,46 @@ function searchTextIndexFor(node, state) {
   return state.searchTextIndex;
 }
 
+function createEdgeState(edge) {
+  const state = {
+    evidenceArray: null,
+    evidenceKeys: null,
+    evidenceLength: 0,
+    evidenceDirty: false,
+  };
+  state.markEvidenceDirty = () => { state.evidenceDirty = true; };
+  edge.evidence = observable(edge.evidence, state.markEvidenceDirty);
+  state.evidenceArray = edge.evidence;
+  state.evidenceLength = edge.evidence.length;
+  return state;
+}
+
+function stateForEdge(edge) {
+  const current = edgeStates.get(edge);
+  if (current) return current;
+  const state = createEdgeState(edge);
+  edgeStates.set(edge, state);
+  return state;
+}
+
+function rebuildEdgeEvidenceKeys(edge, state) {
+  edge.evidence = observable(edge.evidence, state.markEvidenceDirty);
+  state.evidenceKeys = new Set(edge.evidence.map((entry) => JSON.stringify(entry)));
+  state.evidenceArray = edge.evidence;
+  state.evidenceLength = edge.evidence.length;
+  state.evidenceDirty = false;
+}
+
+function edgeEvidenceKeysFor(edge, state) {
+  if (state.evidenceKeys === null
+    || state.evidenceDirty
+    || state.evidenceArray !== edge.evidence
+    || state.evidenceLength !== edge.evidence.length) {
+    rebuildEdgeEvidenceKeys(edge, state);
+  }
+  return state.evidenceKeys;
+}
+
 function countBy(items, field) {
   const counts = {};
   for (const item of items) counts[item[field]] = (counts[item[field]] ?? 0) + 1;
@@ -369,8 +410,30 @@ export class GraphBuilder {
       evidence: normalizeEvidence(evidence),
       data,
     };
-    if (!this.edges.has(id)) this.edges.set(id, edge);
+    if (!this.edges.has(id)) {
+      this.edges.set(id, edge);
+      edgeStates.set(edge, createEdgeState(edge));
+    }
     return this.edges.get(id);
+  }
+
+  addEdgeEvidence(edgeOrId, evidence = []) {
+    const id = typeof edgeOrId === "string" ? edgeOrId : edgeOrId?.id;
+    const edge = this.edges.get(id);
+    if (!edge) throw new Error(`unknown edge: ${String(id)}`);
+    const state = stateForEdge(edge);
+    const evidenceKeys = edgeEvidenceKeysFor(edge, state);
+    for (const entry of normalizeEvidence(evidence)) {
+      const stored = observable(entry, state.markEvidenceDirty);
+      const key = JSON.stringify(stored);
+      if (evidenceKeys.has(key)) continue;
+      evidenceKeys.add(key);
+      edge.evidence.push(stored);
+    }
+    state.evidenceArray = edge.evidence;
+    state.evidenceLength = edge.evidence.length;
+    state.evidenceDirty = false;
+    return edge;
   }
 
   toJSON() {

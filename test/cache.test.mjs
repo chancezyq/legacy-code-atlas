@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -69,6 +69,22 @@ test("file cache treats missing or malformed files as an empty cache", async (t)
   assert.deepEqual([...loaded.keys()], ["src/A.java"]);
 });
 
+test("file cache rejects oversized files before reading their contents", async () => {
+  let readAttempted = false;
+  const loaded = await loadFileCache("oversized-cache.json", {
+    io: {
+      stat: async () => ({ size: 1024 * 1024 * 1024 }),
+      readFile: async () => {
+        readAttempted = true;
+        throw new Error("oversized cache must not be read");
+      },
+    },
+  });
+
+  assert.equal(loaded.size, 0);
+  assert.equal(readAttempted, false);
+});
+
 test("cache entries include only reusable file results", () => {
   const entries = cacheEntriesFromResults([
     {
@@ -102,4 +118,38 @@ test("file cache ignores non-string Map keys instead of throwing", async (t) => 
   await saveFileCache(cachePath, entries);
 
   assert.deepEqual([...await loadFileCache(cachePath).then((cache) => cache.keys())], ["src/A.java"]);
+});
+
+test("file cache treats excessively deep legal JSON entries as cache misses", async (t) => {
+  const root = await temporaryDirectory(t);
+  const cachePath = path.join(root, "deep.json");
+  const depth = 20_000;
+  const nestedFacts = `${'{"nested":'.repeat(depth)}null${"}".repeat(depth)}`;
+  const deepRecord = [
+    '{"factSchema":"legacy-code-atlas/1","relativePath":"src/Deep.java",',
+    '"language":"java","category":"code","size":1,"parserKind":"java",',
+    '"parserVersion":"1","status":"parsed","facts":',
+    nestedFacts,
+    ',"warnings":[],"diagnostics":[]}',
+  ].join("");
+  const payload = `{"schemaVersion":"${CACHE_SCHEMA}","entries":{"src/Deep.java":{"fingerprint":"${"a".repeat(64)}","record":${deepRecord}}}}`;
+  await writeFile(cachePath, payload, "utf8");
+
+  const loaded = await loadFileCache(cachePath);
+
+  assert.equal(loaded.size, 0);
+});
+
+test("file cache skips excessively deep in-memory records while saving", async (t) => {
+  const root = await temporaryDirectory(t);
+  const cachePath = path.join(root, "deep-save.json");
+  let facts = null;
+  for (let index = 0; index < 20_000; index += 1) facts = { nested: facts };
+  const deepRecord = { ...recordFor("src/Deep.java"), facts };
+
+  await saveFileCache(cachePath, new Map([
+    ["src/Deep.java", { fingerprint: "a".repeat(64), record: deepRecord }],
+  ]));
+
+  assert.deepEqual(JSON.parse(await readFile(cachePath, "utf8")).entries, {});
 });

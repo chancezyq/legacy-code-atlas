@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.mjs";
@@ -6,6 +6,7 @@ import { writeFileAtomic } from "./atomic-write.mjs";
 export const CACHE_SCHEMA = "legacy-code-atlas/cache/1";
 const FINGERPRINT = /^[a-f0-9]{64}$/;
 const REUSABLE_STATUSES = new Set(["parsed", "binary", "error"]);
+const MAX_CACHE_FILE_BYTES = 512 * 1024 * 1024;
 
 function isPlainObject(value) {
   return value !== null
@@ -65,8 +66,12 @@ function safeForDirectSerialization(value, ancestors) {
 }
 
 function reusableRecordCopy(record) {
-  if (safeForDirectSerialization(record, new Set())) return record;
-  return cloneJson(record);
+  try {
+    if (safeForDirectSerialization(record, new Set())) return record;
+    return cloneJson(record);
+  } catch {
+    return null;
+  }
 }
 
 function validEntry(relativePath, entry) {
@@ -116,9 +121,13 @@ export function cacheEntriesFromResults(results) {
     .sort(([left], [right]) => left.localeCompare(right, "en")));
 }
 
-export async function loadFileCache(filePath, { io = { readFile } } = {}) {
+export async function loadFileCache(filePath, { io = { readFile, stat } } = {}) {
   let parsed;
   try {
+    const fileStats = await io.stat(filePath);
+    if (!Number.isSafeInteger(fileStats.size)
+      || fileStats.size < 0
+      || fileStats.size > MAX_CACHE_FILE_BYTES) return new Map();
     parsed = JSON.parse(await io.readFile(filePath, "utf8"));
   } catch {
     return new Map();

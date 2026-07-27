@@ -32,7 +32,7 @@ A company fork does not need to use the same version number. What matters is whe
 
 The fixed commands require PowerShell-compatible or POSIX/Git Bash Shell semantics that expand `$HOME` and `$PWD`; a cmd.exe-only host is unsupported. The first full scan must request the maximum supported timeout. If the foreground limit is still insufficient and the host supports background execution, it must start in the background and wait for `analyze` to finish instead of relying on a short default timeout.
 
-> **Namespace note:** The Atlas entry point is now `/atlas`, installed at `%USERPROFILE%\.agents\skills\atlas`. It no longer conflicts with Understand-Anything's `/understand` entry at `%USERPROFILE%\.agents\skills\understand`, so the two Skills can coexist. If an older Atlas version (which used the `/understand` entry) is still installed on the company computer, uninstall it first by running `install.ps1 -Uninstall` from that older source download, then install this version. The installer never overwrites an existing Skill directory it does not own; do not directly delete an unknown Skill directory.
+> **Namespace note:** The Atlas entry point is now `/atlas`, installed at `%USERPROFILE%\.agents\skills\atlas`. It no longer conflicts with Understand-Anything's `/understand` entry at `%USERPROFILE%\.agents\skills\understand`, so the two Skills can coexist. The latest installer requires a valid v2/v3 ownership manifest to prove the exact path and SHA-256, then automatically migrates the older Atlas `/understand` Skill to `/atlas`. An existing Atlas runtime or migration candidate without a valid ownership manifest, a modified, third-party, or unowned legacy file, an occupied Atlas namespace, or a reparse point blocks migration and installation without overwriting the existing files; a clean first install needs no prior manifest.
 
 ### 2. Install it into OpenCode
 
@@ -156,7 +156,9 @@ The selected OpenCode configuration directory is still saved as `configDir` in:
 
 In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does not mean that Atlas owns the directory or any tool inside it. A valid v3 manifest has owner `legacy-code-atlas-install-v3` and exactly one `agent-skill` entry in `ownedFiles`.
 
-The old `commands\understand.md` Markdown command has been removed. The current `/atlas` entry point is a global Agent Skill. During a v1/v2 upgrade, the installer performs a one-time transactional retirement only for a `legacy_atlas.ts` whose path and SHA-256 are proven by the old manifest. A matching file is moved to a transaction backup and removed after the v3 manifest commits; an already-missing file does not block migration. A modified owned tool or any unowned/duplicate tool is preserved and blocks installation until its origin is verified. No replacement tool is written.
+The old `commands\understand.md` Markdown command has been removed. The current `/atlas` entry point is a global Agent Skill. When a valid v2/v3 manifest proves that `skills\understand\SKILL.md` belongs to an older Atlas installation by its expected path and SHA-256, the installer includes it in the migration transaction and publishes the new `skills\atlas\SKILL.md`. This never migrates Understand-Anything or another third party's `/understand` Skill. During a v1/v2 upgrade, the installer also transactionally retires only a `legacy_atlas.ts` and old command whose exact paths and SHA-256 values are proven by the old manifest. It writes no replacement tool.
+
+Preflight rejects reparse points, occupied transaction paths, modified or unowned legacy files, and a foreign or occupied `/atlas` namespace; it also stops when an existing runtime or migration candidate has no valid ownership manifest. Immediately before replacing the current Atlas Skill or retiring each legacy Skill, tool, or command, the installer performs a final expected-existence check and rechecks the SHA-256 of every file that is present. Matching legacy files first move to transaction-specific backups. Those backups are cleaned up only after the new v3 manifest commits and their existence and hashes still match; rollback likewise restores only hash-verified backups. An already-missing legacy file does not block migration, while any file whose ownership cannot be proven is preserved for origin review.
 
 ## Update and uninstall
 
@@ -166,7 +168,7 @@ To update, download and extract the new source, open Windows PowerShell in the n
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Updates reuse the manifest-owned Skill path. The installer refuses to overwrite a modified owned Skill. During v1/v2 migration, a modified owned old tool or command also blocks migration. Back up the conflicting file and verify its origin before resolving it; see the [detailed OpenCode installation and recovery guide](docs/opencode-en.md).
+Updates reuse the manifest-owned Skill path. The installer refuses to overwrite a modified owned Skill. During v1/v2 migration, a modified owned old tool or command also blocks migration. Automatic migration is unavailable without a valid ownership manifest. Back up the conflicting file and verify its origin before resolving it; see the [detailed OpenCode installation and recovery guide](docs/opencode-en.md).
 
 To uninstall:
 

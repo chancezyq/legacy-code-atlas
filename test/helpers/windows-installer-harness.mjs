@@ -24,6 +24,7 @@ const powerShellPrefix = [
   "Bypass",
   "-File",
 ];
+export const skillModifiedAfterPreflightContent = "# User modified Skill after preflight\n";
 const installerFailpointStatements = new Map([
   ["after-journal", "Write-TransactionJournal $Transaction"],
   [
@@ -32,6 +33,7 @@ const installerFailpointStatements = new Map([
   ],
   ["after-runtime", "Move-RuntimeIntoPlace $Transaction"],
   ["after-skill", "Replace-SkillFile $Transaction"],
+  ["after-legacy-skill", "Backup-LegacySkill $Transaction"],
   ["after-legacy-tool", "Backup-LegacyTool $Transaction"],
   ["after-legacy-command", "Backup-LegacyCommand $Transaction"],
   ["after-manifest", "Commit-ManifestFile $Transaction"],
@@ -39,6 +41,14 @@ const installerFailpointStatements = new Map([
   [
     "before-skill-recheck",
     "$skillNamespaceBeforePublish = Get-PathEntryWithoutFollowingTarget $SkillDir",
+  ],
+  [
+    "before-skill-replace",
+    "Replace-TransactionFile -Temporary $stagedSkillTarget -Target $SkillTarget -Backup $Transaction.SkillBackup -ExpectedExisted $Transaction.SkillExisted -ExpectedCurrentSha256 $Transaction.PreviousSkillSha256",
+  ],
+  [
+    "before-uninstall-final-hash",
+    "$finalHash = Get-ContentHash $entry.Path",
   ],
 ]);
 
@@ -60,6 +70,14 @@ function sameWindowsPath(left, right) {
 
 function sha256Bytes(content) {
   return createHash("sha256").update(content).digest("hex").toUpperCase();
+}
+
+function getSkillName(options) {
+  const skillName = options.skillName ?? "atlas";
+  if (skillName !== "atlas" && skillName !== "understand") {
+    throw new TypeError(`unsupported Skill namespace: ${skillName}`);
+  }
+  return skillName;
 }
 
 export function assertWindowsPowerShell51({ major, minor, version }) {
@@ -201,13 +219,14 @@ export async function createV1Install(sandbox, options = {}) {
 export async function createV2Install(sandbox, options = {}) {
   requireSandbox(sandbox);
   const configDir = options.configDir ?? sandbox.configDir;
+  const skillName = getSkillName(options);
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
   const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
   const skillTarget = path.join(
     sandbox.homeDir,
     ".agents",
     "skills",
-    "atlas",
+    skillName,
     "SKILL.md",
   );
   const toolTarget = path.join(configDir, "tools", "legacy_atlas.ts");
@@ -261,9 +280,10 @@ export async function createV2Install(sandbox, options = {}) {
 export async function createV3Install(sandbox, options = {}) {
   requireSandbox(sandbox);
   const configDir = options.configDir ?? sandbox.configDir;
+  const skillName = getSkillName(options);
   const installDir = path.join(sandbox.homeDir, ".legacy-code-atlas");
   const ownerMarker = path.join(installDir, ".legacy-code-atlas-owner.json");
-  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", "atlas");
+  const skillDir = path.join(sandbox.homeDir, ".agents", "skills", skillName);
   const skillTarget = path.join(skillDir, "SKILL.md");
   const skillContent = options.skillContent ?? "# Installed Legacy Code Atlas Skill\n";
   const skillHash = sha256Bytes(Buffer.from(skillContent, "utf8"));
@@ -317,10 +337,16 @@ export async function createInstrumentedInstaller({
   if (!statement) {
     throw new TypeError(`unsupported installer failpoint phase: ${phase}`);
   }
-  if (action !== "throw" && action !== "crash" && action !== "create-skill-conflict") {
+  if (action !== "throw" && action !== "crash" &&
+      action !== "create-skill-conflict" && action !== "modify-skill") {
     throw new TypeError(`unsupported installer failpoint action: ${action}`);
   }
   if ((phase === "before-skill-recheck") !== (action === "create-skill-conflict")) {
+    throw new TypeError(`installer failpoint phase/action mismatch: ${phase}/${action}`);
+  }
+  const modifiesSkill = phase === "before-skill-replace"
+    || phase === "before-uninstall-final-hash";
+  if (modifiesSkill !== (action === "modify-skill")) {
     throw new TypeError(`installer failpoint phase/action mismatch: ${phase}/${action}`);
   }
 
@@ -380,12 +406,19 @@ export async function createInstrumentedInstaller({
         "[Diagnostics.Process]::GetCurrentProcess().Kill()",
         "exit 197",
       ].join(newline);
-  } else {
+  } else if (action === "create-skill-conflict") {
     effect = "New-Item -ItemType Directory -Path $SkillDir -Force | Out-Null";
+  } else {
+    effect = [
+      "$modifiedSkillEncoding = New-Object System.Text.UTF8Encoding -ArgumentList $false",
+      '[IO.File]::WriteAllText($SkillTarget, "# User modified Skill after preflight`n", $modifiedSkillEncoding)',
+    ].join(newline);
   }
   const replacement = phase === "after-recovery"
     ? `${newline}${statement}${newline}${marker}${newline}${effect}${newline}`
     : phase === "before-skill-recheck"
+        || phase === "before-skill-replace"
+        || phase === "before-uninstall-final-hash"
       ? [marker, effect, statement].join(newline)
       : [statement, marker, effect].join(newline);
   const instrumented = installer.replace(anchor, replacement);

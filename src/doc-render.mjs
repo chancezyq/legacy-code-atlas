@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { renderInlineText } from "./render.mjs";
 
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
@@ -12,10 +14,12 @@ const MODEL_TRUNCATION_NOTICE = "> Note: the number of entries exceeded the gene
 function createWriter() {
   const chunks = [];
   const suffix = `\n${TRUNCATION_NOTICE}\n`;
+  const closingFence = "```\n";
   const budget = MAX_DOCUMENT_BYTES - Buffer.byteLength(suffix);
   let bytes = 0;
   let truncated = false;
   let exhausted = false;
+  let fenceOpen = false;
   return {
     get exhausted() {
       return exhausted;
@@ -24,13 +28,18 @@ function createWriter() {
       if (exhausted) return false;
       const chunk = `${value}\n`;
       const chunkBytes = Buffer.byteLength(chunk);
-      if (bytes + chunkBytes > budget) {
+      const closesFence = fenceOpen && value === "```";
+      const opensFence = !fenceOpen && value !== "```" && value.startsWith("```");
+      const nextFenceOpen = closesFence ? false : (opensFence || fenceOpen);
+      const reservedBytes = nextFenceOpen ? Buffer.byteLength(closingFence) : 0;
+      if (bytes + chunkBytes + reservedBytes > budget) {
         truncated = true;
         exhausted = true;
         return false;
       }
       chunks.push(chunk);
       bytes += chunkBytes;
+      fenceOpen = nextFenceOpen;
       return true;
     },
     lines(...values) {
@@ -41,7 +50,8 @@ function createWriter() {
     },
     finish() {
       const content = chunks.join("");
-      return truncated ? `${content}${suffix}` : content;
+      const fenceSuffix = fenceOpen ? closingFence : "";
+      return truncated ? `${content}${fenceSuffix}${suffix}` : `${content}${fenceSuffix}`;
     },
   };
 }
@@ -55,8 +65,12 @@ function mermaidLabel(value, fallback = "unnamed") {
     .replace(/\s+/gu, " ")
     .trim();
   const label = cleaned || fallback;
-  if (label.length <= MAX_MERMAID_LABEL_CHARACTERS) return label;
-  return `${label.slice(0, MAX_MERMAID_LABEL_CHARACTERS - 3)}...`;
+  const characters = Array.from(label);
+  if (characters.length <= MAX_MERMAID_LABEL_CHARACTERS) return label;
+  const digest = createHash("sha256").update(label).digest("hex").slice(0, 8);
+  const suffixCharacters = 28;
+  const prefixCharacters = MAX_MERMAID_LABEL_CHARACTERS - suffixCharacters - digest.length - 4;
+  return `${characters.slice(0, prefixCharacters).join("")}...${characters.slice(-suffixCharacters).join("")}#${digest}`;
 }
 
 function citation(evidence) {
@@ -83,12 +97,15 @@ const ACCESS_LABELS = new Map([
 const OUTCOME_LABELS = new Map([
   ["forwards_to", "forwards to"],
   ["redirects_to", "redirects to"],
+  ["composes", "composes"],
 ]);
 const ARRIVAL_LABELS = new Map([
   ["forwards_to", "forward"],
   ["redirects_to", "redirect"],
   ["includes", "include"],
   ["uses_tile", "Tiles composition"],
+  ["puts", "Tiles put"],
+  ["uses_template", "Tiles template"],
 ]);
 
 function tableCell(value) {
@@ -130,6 +147,7 @@ export function renderUseCases(model) {
   const scope = scopeLine(model);
   if (scope) writer.line(scope);
   if (model.truncated) writer.lines("", MODEL_TRUNCATION_NOTICE);
+  if (model.useCases.length === 0) writer.lines("", "- No use cases were found in the selected index or scope.");
 
   for (const module of model.modules) {
     if (writer.exhausted) break;
@@ -143,8 +161,13 @@ export function renderUseCases(model) {
         `- Source: ${source || "no direct evidence"}`,
         `- ${confidenceNote(useCase)}`,
       );
-      if (useCase.request.methods.length > 0) {
-        writer.line(`- Request: ${useCase.request.methods.join("/")}${useCase.request.parameters.length > 0 ? `, parameters ${useCase.request.parameters.map((name) => `\`${renderInlineText(name)}\``).join(", ")}` : ""}`);
+      if (useCase.request.methods.length > 0 || useCase.request.hasUnknownMethod) {
+        const methods = useCase.request.methods.length === 0
+          ? "method unresolved"
+          : useCase.request.hasUnknownMethod
+            ? `known methods ${useCase.request.methods.join("/")}; other methods unresolved`
+            : useCase.request.methods.join("/");
+        writer.line(`- Request: ${methods}${useCase.request.parameters.length > 0 ? `, parameters ${useCase.request.parameters.map((name) => `\`${renderInlineText(name)}\``).join(", ")}` : ""}`);
       }
       if (useCase.triggers.length > 0) {
         writer.line("- Triggers:");
@@ -156,6 +179,7 @@ export function renderUseCases(model) {
       } else {
         writer.line("- Triggers: no page entry found (possibly triggered by an external system or an unresolved dynamic call)");
       }
+      if (useCase.triggersTruncated) writer.line("  - (additional triggers were truncated)");
       if (useCase.inputs.length > 0) {
         writer.line(`- Inputs: ${useCase.inputs.map((name) => `\`${renderInlineText(name)}\``).join(", ")}`);
       }
@@ -165,7 +189,13 @@ export function renderUseCases(model) {
         const ref = citation(step.evidence);
         writer.line(`  ${step.index}. ${renderInlineText(step.nodeType)} ${renderInlineText(step.name)}${via}${ref ? `, evidence ${ref}` : ""}`);
       }
-      if (useCase.flowTruncated) writer.line("  - (main flow exceeds the display limit and was truncated)");
+      if (useCase.flowDisplayTruncated
+        ?? (useCase.flowTruncated && useCase.flowTraversalTruncated !== true)) {
+        writer.line("  - (main flow exceeds the display limit and was truncated)");
+      }
+      if (useCase.flowTraversalTruncated) {
+        writer.line("  - (flow traversal limit reached; additional branches may be omitted)");
+      }
       if (useCase.outcomes.length > 0) {
         writer.line("- Outcomes:");
         for (const outcome of useCase.outcomes) {
@@ -185,6 +215,7 @@ export function renderUseCases(model) {
       } else {
         writer.line("- Tables: no direct reads or writes found");
       }
+      if (useCase.tablesTruncated) writer.line("  - (additional tables were truncated)");
       writer.line("");
     }
     crudMatrix(module, writer);
@@ -203,6 +234,7 @@ export function renderUiSpec(model) {
   const scope = scopeLine(model);
   if (scope) writer.line(scope);
   if (model.truncated) writer.lines("", MODEL_TRUNCATION_NOTICE);
+  if (model.pages.length === 0) writer.lines("", "- No pages were found in the selected index or scope.");
 
   for (const page of model.pages) {
     if (writer.exhausted) break;
@@ -228,57 +260,138 @@ export function renderUiSpec(model) {
     } else {
       writer.line("- Page actions: none");
     }
+    if (page.actionsTruncated) writer.line("  - (additional page actions were truncated)");
     if (page.arrivals.length > 0) {
       writer.line("- Arrival paths:");
       for (const arrival of page.arrivals) {
         const kind = ARRIVAL_LABELS.get(arrival.kind) ?? arrival.kind;
-        writer.line(`  - ${kind} from ${renderInlineText(arrival.fromType)} ${renderInlineText(arrival.from)}`);
+        const ref = citation(arrival.evidence);
+        writer.line(`  - ${kind} from ${renderInlineText(arrival.fromType)} ${renderInlineText(arrival.from)}${ref ? ` (${ref})` : ""}`);
       }
     }
+    if (page.arrivalsTruncated) writer.line("  - (additional arrival paths were truncated)");
   }
   return writer.finish();
 }
 
 function moduleFlowchart(module, writer) {
   const nodeIds = new Map();
-  const lines = [];
-  const edges = new Set();
-  let hasHeuristicEdge = false;
+  const nodeLines = [];
+  const edges = new Map();
+  const addEdge = (source, target, line, heuristic = false) => {
+    if (!edges.has(line)) edges.set(line, { source, target, line, heuristic });
+  };
   const idFor = (key, label, shapeOpen, shapeClose) => {
     let id = nodeIds.get(key);
     if (!id) {
       id = `n${nodeIds.size}`;
       nodeIds.set(key, id);
-      lines.push(`  ${id}${shapeOpen}${mermaidLabel(label)}${shapeClose}`);
+      nodeLines.push({ id, line: `  ${id}${shapeOpen}${mermaidLabel(label)}${shapeClose}` });
     }
     return id;
   };
   for (const useCase of module.useCases) {
-    const routeId = idFor(`route:${useCase.route}`, useCase.route, "([", "])");
+    const routeId = idFor(useCase.routeId ?? `route:${useCase.route}`, useCase.route, "([", "])");
     for (const trigger of useCase.triggers) {
       const pageId = idFor(`page:${trigger.pagePath}`, trigger.pagePath, "[", "]");
       const heuristic = trigger.confidence < 0.95;
-      hasHeuristicEdge ||= heuristic;
-      edges.add(`  ${pageId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(trigger.kind)}| ${routeId}`);
+      addEdge(
+        pageId,
+        routeId,
+        `  ${pageId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(trigger.kind)}| ${routeId}`,
+        heuristic,
+      );
+    }
+    const flowTableAccess = new Map();
+    let previousId = routeId;
+    for (let index = 0; index < useCase.mainFlow.length; index += 1) {
+      const step = useCase.mainFlow[index];
+      if (index === 0 && step.nodeType === "route") {
+        continue;
+      }
+      let shapeOpen = "[";
+      let shapeClose = "]";
+      if (step.nodeType === "java_method" || step.nodeType === "java_type") {
+        shapeOpen = "[[";
+        shapeClose = "]]";
+      } else if (step.nodeType === "statement" || step.nodeType === "procedure") {
+        shapeOpen = "{{";
+        shapeClose = "}}";
+      } else if (step.nodeType === "table") {
+        shapeOpen = "[(";
+        shapeClose = ")]";
+        const access = step.via === "reads_from"
+          ? "read"
+          : step.via === "writes_to"
+            ? "write"
+            : null;
+        if (access) {
+          const represented = flowTableAccess.get(step.name) ?? new Set();
+          represented.add(access);
+          flowTableAccess.set(step.name, represented);
+        }
+      } else if (step.nodeType === "route") {
+        shapeOpen = "([";
+        shapeClose = "])";
+      }
+      const stepId = idFor(
+        step.nodeId ?? `${step.nodeType}:${step.name}`,
+        step.name,
+        shapeOpen,
+        shapeClose,
+      );
+      const heuristic = step.confidence < 0.95;
+      addEdge(
+        previousId,
+        stepId,
+        `  ${previousId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(step.via ?? "flows_to")}| ${stepId}`,
+        heuristic,
+      );
+      previousId = stepId;
     }
     for (const table of useCase.tables) {
+      const represented = flowTableAccess.get(table.name);
+      const accessIsRepresented = table.access === "read-write"
+        ? represented?.has("read") && represented.has("write")
+        : represented?.has(table.access);
+      if (accessIsRepresented) continue;
       const tableId = idFor(`table:${table.name}`, table.name, "[(", ")]");
-      edges.add(`  ${routeId} -->|${mermaidLabel(ACCESS_LABELS.get(table.access) ?? table.access)}| ${tableId}`);
+      addEdge(
+        routeId,
+        tableId,
+        `  ${routeId} -->|${mermaidLabel(ACCESS_LABELS.get(table.access) ?? table.access)}| ${tableId}`,
+      );
     }
   }
   if (nodeIds.size === 0) return;
+  const sortedEdges = [...edges.values()].sort((left, right) => (
+    left.line < right.line ? -1 : left.line > right.line ? 1 : 0
+  ));
+  const retainedEdges = sortedEdges.slice(0, MAX_DIAGRAM_EDGES);
+  const retainedNodeIds = new Set(retainedEdges.flatMap((edge) => [edge.source, edge.target]));
+  const renderedNodeLines = retainedEdges.length === 0
+    ? nodeLines
+    : nodeLines.filter((node) => retainedNodeIds.has(node.id));
+  const hasHeuristicEdge = retainedEdges.some((edge) => edge.heuristic);
   writer.lines(
     "",
     `## Module overview: ${renderInlineText(module.name)}`,
     "",
-    `Legend: rectangles are pages, rounded nodes are routes, cylinders are tables${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}.`,
+    `Legend: rectangles are pages, rounded nodes are routes, double rectangles are Java methods, hexagons are SQL statements or procedures, and cylinders are tables${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}.`,
     "",
     "```mermaid",
     "flowchart LR",
   );
-  for (const line of lines) writer.line(line);
-  for (const edge of [...edges].sort().slice(0, MAX_DIAGRAM_EDGES)) writer.line(edge);
+  for (const node of renderedNodeLines) {
+    if (!writer.line(node.line)) break;
+  }
+  for (const edge of retainedEdges) {
+    if (!writer.line(edge.line)) break;
+  }
   writer.lines("```");
+  if (!writer.exhausted && sortedEdges.length > MAX_DIAGRAM_EDGES) {
+    writer.lines("", MODEL_TRUNCATION_NOTICE);
+  }
 }
 
 function sequenceDiagram(useCase, writer) {
@@ -289,7 +402,9 @@ function sequenceDiagram(useCase, writer) {
     writer.line(`  participant P${index} as ${mermaidLabel(`${step.nodeType} ${step.name}`)}`);
   });
   for (let index = 1; index < steps.length; index += 1) {
-    writer.line(`  P${index - 1}->>P${index}: ${mermaidLabel(steps[index].via ?? "calls")}`);
+    const heuristic = steps[index].confidence < 0.95;
+    const label = mermaidLabel(steps[index].via ?? "calls");
+    writer.line(`  P${index - 1}${heuristic ? "-->>" : "->>"}P${index}: ${label}${heuristic ? " (heuristic)" : ""}`);
   }
   if (useCase.mainFlow.length > steps.length) {
     writer.line(`  Note over P${steps.length - 1}: remaining steps truncated`);
@@ -299,40 +414,78 @@ function sequenceDiagram(useCase, writer) {
 
 function navigationDiagram(model, writer) {
   const nodeIds = new Map();
-  const lines = [];
-  const edges = new Set();
+  const nodeLines = [];
+  const edges = new Map();
+  const addEdge = (source, target, line, heuristic = false) => {
+    if (!edges.has(line)) edges.set(line, { source, target, line, heuristic });
+  };
   const idFor = (key, label, shapeOpen = "[", shapeClose = "]") => {
     let id = nodeIds.get(key);
     if (!id) {
       id = `s${nodeIds.size}`;
       nodeIds.set(key, id);
-      lines.push(`  ${id}${shapeOpen}${mermaidLabel(label)}${shapeClose}`);
+      nodeLines.push({ id, line: `  ${id}${shapeOpen}${mermaidLabel(label)}${shapeClose}` });
     }
     return id;
   };
   for (const useCase of model.useCases) {
     if (useCase.triggers.length === 0 && useCase.outcomes.length === 0) continue;
-    const routeId = idFor(`route:${useCase.route}`, useCase.route, "([", "])");
+    const routeId = idFor(`route:${useCase.routeId ?? useCase.route}`, useCase.route, "([", "])");
     for (const trigger of useCase.triggers) {
-      edges.add(`  ${idFor(`page:${trigger.pageName}`, trigger.pageName)} -->|${mermaidLabel(trigger.kind)}| ${routeId}`);
+      const pageKey = trigger.pageId ?? trigger.pagePath ?? trigger.pageName;
+      const pageLabel = trigger.pagePath ?? trigger.pageName;
+      const heuristic = typeof trigger.confidence === "number" && trigger.confidence < 0.95;
+      const pageId = idFor(`page:${pageKey}`, pageLabel);
+      addEdge(
+        pageId,
+        routeId,
+        `  ${pageId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(trigger.kind)}| ${routeId}`,
+        heuristic,
+      );
     }
     for (const outcome of useCase.outcomes) {
-      edges.add(`  ${routeId} -->|${mermaidLabel(outcome.reason || outcome.kind)}| ${idFor(`page:${outcome.target}`, outcome.target)}`);
+      const pageKey = outcome.targetId ?? outcome.targetPath ?? outcome.target;
+      const pageLabel = outcome.targetPath ?? outcome.target;
+      const targetType = outcome.targetType ?? (outcome.kind === "redirects_to" ? "route" : "page");
+      const targetId = targetType === "route"
+        ? idFor(`route:${pageKey}`, pageLabel, "([", "])")
+        : idFor(`page:${pageKey}`, pageLabel);
+      const heuristic = typeof outcome.confidence === "number" && outcome.confidence < 0.95;
+      addEdge(
+        routeId,
+        targetId,
+        `  ${routeId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(outcome.reason || outcome.kind)}| ${targetId}`,
+        heuristic,
+      );
     }
   }
   if (edges.size === 0) return;
+  const sortedEdges = [...edges.values()].sort((left, right) => (
+    left.line < right.line ? -1 : left.line > right.line ? 1 : 0
+  ));
+  const retainedEdges = sortedEdges.slice(0, MAX_DIAGRAM_EDGES);
+  const retainedNodeIds = new Set(retainedEdges.flatMap((edge) => [edge.source, edge.target]));
+  const renderedNodeLines = nodeLines.filter((node) => retainedNodeIds.has(node.id));
+  const hasHeuristicEdge = retainedEdges.some((edge) => edge.heuristic);
   writer.lines(
     "",
     "## Screen navigation",
     "",
-    "Legend: rectangles are pages, rounded nodes are routes; edge labels are the navigation trigger or the forward/redirect result.",
+    `Legend: rectangles are pages, rounded nodes are routes; edge labels are the navigation trigger or the forward/redirect/composition result${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}.`,
     "",
     "```mermaid",
     "flowchart LR",
   );
-  for (const line of lines) writer.line(line);
-  for (const edge of [...edges].sort().slice(0, MAX_DIAGRAM_EDGES)) writer.line(edge);
+  for (const node of renderedNodeLines) {
+    if (!writer.line(node.line)) break;
+  }
+  for (const edge of retainedEdges) {
+    if (!writer.line(edge.line)) break;
+  }
   writer.lines("```");
+  if (!writer.exhausted && sortedEdges.length > MAX_DIAGRAM_EDGES) {
+    writer.lines("", MODEL_TRUNCATION_NOTICE);
+  }
 }
 
 export function renderDiagrams(model) {
@@ -345,6 +498,7 @@ export function renderDiagrams(model) {
   const scope = scopeLine(model);
   if (scope) writer.line(scope);
   if (model.truncated) writer.lines("", MODEL_TRUNCATION_NOTICE);
+  if (model.useCases.length === 0) writer.lines("", "- No diagram relationships were found in the selected index or scope.");
 
   navigationDiagram(model, writer);
 
@@ -355,14 +509,17 @@ export function renderDiagrams(model) {
     moduleFlowchart(module, writer);
   }
 
-  const sequenced = [...model.useCases]
+  const sequenceCandidates = [...model.useCases]
     .filter((useCase) => useCase.mainFlow.length >= 2)
     .sort((left, right) => right.mainFlow.length - left.mainFlow.length
-      || (left.route < right.route ? -1 : left.route > right.route ? 1 : 0))
-    .slice(0, MAX_SEQUENCE_DIAGRAMS);
+      || (left.route < right.route ? -1 : left.route > right.route ? 1 : 0));
+  const sequenced = sequenceCandidates.slice(0, MAX_SEQUENCE_DIAGRAMS);
   for (const useCase of sequenced) {
     if (writer.exhausted) break;
     sequenceDiagram(useCase, writer);
+  }
+  if (!writer.exhausted && sequenceCandidates.length > sequenced.length) {
+    writer.lines("", MODEL_TRUNCATION_NOTICE);
   }
   return writer.finish();
 }

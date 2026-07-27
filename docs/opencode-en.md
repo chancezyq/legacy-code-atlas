@@ -12,7 +12,7 @@ The first full scan must request the maximum supported timeout. If the foregroun
 
 ## Windows installation
 
-The Atlas Agent Skill now installs at `%USERPROFILE%\.agents\skills\atlas\SKILL.md` with the `/atlas` entry point. It does not occupy Understand-Anything's `%USERPROFILE%\.agents\skills\understand\SKILL.md` (`/understand` entry), so the two Skills can coexist. An older Atlas version used `skills\understand`; if it is still present, uninstall it first by running `install.ps1 -Uninstall` from that older source download, then install this version. The Atlas installer refuses to overwrite an existing directory it does not own; do not manually delete a Skill directory of unknown origin.
+The Atlas Agent Skill now installs at `%USERPROFILE%\.agents\skills\atlas\SKILL.md` with the `/atlas` entry point. It does not occupy Understand-Anything's `%USERPROFILE%\.agents\skills\understand\SKILL.md` (`/understand` entry), so the two Skills can coexist. The latest installer requires a valid v2/v3 ownership manifest to prove the exact path and SHA-256, then automatically migrates the older Atlas `/understand` Skill to `/atlas`. An existing Atlas runtime or migration candidate without a valid ownership manifest, a modified, third-party, or unowned legacy file, an occupied Atlas namespace, or a reparse point blocks migration and installation without overwriting the existing files; a clean first install needs no prior manifest.
 
 Windows PowerShell 5.1 and Node.js 20 or later are required. Download and extract the source, open Windows PowerShell in the `legacy-code-atlas` directory, and run:
 
@@ -89,7 +89,9 @@ The selected OpenCode configuration directory is still stored as `configDir` in:
 
 In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does not mean that Atlas owns the directory or any tool inside it. The Agent Skill always remains at `%USERPROFILE%\.agents\skills\atlas\SKILL.md`.
 
-The former Markdown command at `commands\understand.md` has been removed. A v1/v2 upgrade to v3 retires a `legacy_atlas.ts` only when its exact path and SHA-256 are proven by the old manifest; it never writes a placeholder tool. A missing owned tool does not block migration. A modified owned tool, or an unowned/duplicate tool, is preserved and blocks installation until its origin is verified. The v1 owned command follows the same hash-protected rule. Neither legacy file is a current entry point.
+The former Markdown command at `commands\understand.md` has been removed. When a valid v2/v3 manifest proves that `skills\understand\SKILL.md` belongs to an older Atlas installation by its expected path and SHA-256, the installer automatically includes it in the migration transaction and publishes the new `skills\atlas\SKILL.md`. This never migrates Understand-Anything or another third party's `/understand` Skill. A v1/v2 upgrade to v3 also retires only a `legacy_atlas.ts` and old command whose exact paths and SHA-256 values are proven by the old manifest; it never writes a placeholder tool. Neither legacy file is a current entry point.
+
+Preflight rejects reparse points, occupied transaction paths, modified or unowned legacy files, and a foreign or occupied `/atlas` namespace; it also stops when an existing runtime or migration candidate has no valid ownership manifest. Immediately before replacing the current Atlas Skill or retiring each legacy Skill, tool, or command, the installer performs a final expected-existence check and rechecks the SHA-256 of every file that is present. Matching legacy files first move to transaction-specific backups. Those backups are cleaned up only after the new v3 manifest commits and their existence and hashes still match; rollback likewise restores only hash-verified backups. An already-missing legacy file does not block migration, while any file whose ownership cannot be proven is preserved for origin review.
 
 ## Inspecting manifest v3
 

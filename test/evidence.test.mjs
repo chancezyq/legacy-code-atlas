@@ -146,7 +146,10 @@ test("parser source structure reuses one locator per top-level source", async ()
   assert.equal(occurrenceCount(jspSource, "createEvidenceLocator(content, filePath)"), 2);
   assert.match(jspSource, /locator = createEvidenceLocator\(content, filePath\)/);
   assert.match(jspSource, /const locator = createEvidenceLocator\(content, filePath\);/);
-  assert.match(jspSource, /extractJavaScriptRequests\(content, filePath, pageWebPath, locator\)/);
+  assert.match(
+    jspSource,
+    /extractJavaScriptRequests\(\s*content,\s*filePath,\s*pageWebPath,\s*locator,\s*scanSources\.javaScript,\s*\)/u,
+  );
 
   assert.match(xmlSource, /findXmlElements\(content, tagName, filePath, locator = createEvidenceLocator\(content, filePath\)\)/);
   assert.equal(occurrenceCount(webConfigSource, "createEvidenceLocator(source, filePath)"), 1);

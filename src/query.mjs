@@ -79,6 +79,7 @@ function traverse(graph, startIds, options = {}) {
   let truncated = false;
   let stateLimitReached = false;
   let pathLimitReached = false;
+  let depthLimitReached = false;
   let haltedPath = null;
 
   traversal: while (queueIndex < queue.length && paths.length < maxPaths) {
@@ -92,11 +93,23 @@ function traverse(graph, startIds, options = {}) {
     queueIndex += 1;
     statesExpanded += 1;
     const next = (adjacent.get(path.current) ?? []).filter((entry) => !path.nodes.includes(entry.to));
+    const depthLimited = next.length > 0 && path.edges.length >= maxDepth;
     const isTerminal = next.length === 0
-      || path.edges.length >= maxDepth
+      || depthLimited
       || (direction !== "incoming" && nodeById.get(path.current)?.type === "table");
     if (isTerminal) {
-      if (path.nodes.length > 1) paths.push({ nodes: path.nodes, edges: path.edges, edgeIds: path.edgeIds });
+      if (depthLimited) {
+        truncated = true;
+        depthLimitReached = true;
+      }
+      if (path.nodes.length > 1) {
+        paths.push({
+          nodes: path.nodes,
+          edges: path.edges,
+          edgeIds: path.edgeIds,
+          ...(depthLimited ? { truncated: true } : {}),
+        });
+      }
       continue;
     }
     for (const entry of next) {
@@ -148,8 +161,10 @@ function traverse(graph, startIds, options = {}) {
     truncated,
     stateLimit: maxStates,
     pathLimit: maxPaths,
+    depthLimit: maxDepth,
     stateLimitReached,
     pathLimitReached,
+    depthLimitReached,
     statesExpanded,
     statesEnqueued,
   };
@@ -168,6 +183,8 @@ function mergeTraversals(...traversals) {
   let pathLimit = 0;
   let stateLimitReached = false;
   let pathLimitReached = false;
+  let depthLimitReached = false;
+  let depthLimit = 0;
   let statesExpanded = 0;
   let statesEnqueued = 0;
   for (const traversal of traversals) {
@@ -177,8 +194,10 @@ function mergeTraversals(...traversals) {
     truncated ||= traversal.truncated;
     stateLimit = Math.max(stateLimit, traversal.stateLimit);
     pathLimit = Math.max(pathLimit, traversal.pathLimit);
+    depthLimit = Math.max(depthLimit, traversal.depthLimit);
     stateLimitReached ||= traversal.stateLimitReached;
     pathLimitReached ||= traversal.pathLimitReached;
+    depthLimitReached ||= traversal.depthLimitReached;
     statesExpanded += traversal.statesExpanded;
     statesEnqueued += traversal.statesEnqueued;
   }
@@ -189,8 +208,10 @@ function mergeTraversals(...traversals) {
     truncated,
     stateLimit,
     pathLimit,
+    depthLimit,
     stateLimitReached,
     pathLimitReached,
+    depthLimitReached,
     statesExpanded,
     statesEnqueued,
   };
@@ -208,8 +229,10 @@ function trace(graph, query, { mode, types, direction, allowedEdgeTypes }) {
     truncated: false,
     stateLimit: 0,
     pathLimit: 0,
+    depthLimit: 0,
     stateLimitReached: false,
     pathLimitReached: false,
+    depthLimitReached: false,
     statesExpanded: 0,
     statesEnqueued: 0,
     warnings: [`未找到：${query}`, ...(graph.warnings ?? [])],
@@ -238,6 +261,11 @@ function trace(graph, query, { mode, types, direction, allowedEdgeTypes }) {
         ? [direction === "split"
             ? `追踪在至少一个方向达到每个方向 ${traversal.pathLimit} 条路径的结果上限，结果已截断。`
             : `追踪达到 ${traversal.pathLimit} 条路径的结果上限，结果已截断。`]
+        : []),
+      ...(traversal.depthLimitReached
+        ? [direction === "split"
+            ? `追踪在至少一个方向达到每个方向 ${traversal.depthLimit} 层的深度上限，结果已截断。`
+            : `追踪达到 ${traversal.depthLimit} 层的深度上限，结果已截断。`]
         : []),
       ...(graph.warnings ?? []),
     ],
