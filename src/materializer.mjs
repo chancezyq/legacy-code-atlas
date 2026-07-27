@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { GraphBuilder } from "./graph.mjs";
+import { isValidOutcomeName } from "./outcome-metadata.mjs";
 import { normalizeRequestUrl, webPathForFile } from "./parsers/jsp.mjs";
 import { resolveFacts } from "./resolver.mjs";
 import { effectiveTilePages } from "./tile-composition.mjs";
@@ -28,14 +29,20 @@ function addRoute(graph, ownerNode, request, edgeType) {
     evidence: [request.evidence],
     searchText: [request.url, request.kind ?? request.source ?? ""],
   });
-  if (Object.hasOwn(request, "method") || Object.hasOwn(request, "parameters")) {
+  if (Object.hasOwn(request, "method")
+    || Object.hasOwn(request, "parameters")
+    || Object.hasOwn(request, "dispatchMethod")) {
     const hint = {
       method: request.method ?? "",
       parameters: request.parameters ?? {},
       evidence: request.evidence,
+      ...(typeof request.dispatchMethod === "string"
+        ? { dispatchMethod: request.dispatchMethod }
+        : {}),
       ...(typeof request.parametersComplete === "boolean"
         ? { parametersComplete: request.parametersComplete }
         : {}),
+      ...(request.hasDynamicParameterNames === true ? { hasDynamicParameterNames: true } : {}),
     };
     graph.addNodeDataItem(route, "requestHints", hint);
   }
@@ -189,7 +196,16 @@ function methodRecord(graph, type, method, disambiguateSignature = false) {
     filePath: type.node.filePath,
     evidence: [method.evidence],
     data: { owner: type.fullName, method: method.name, arity, parameters: method.parameters, returnType: method.returnType },
-    searchText: [type.fullName, type.name, method.name, ...method.parameters],
+    searchText: [
+      type.fullName,
+      ...(type.canonicalName ? [type.canonicalName] : []),
+      type.name,
+      method.name,
+      ...(type.canonicalName && type.canonicalName !== type.fullName
+        ? [`${type.canonicalName}.${method.name}`]
+        : []),
+      ...method.parameters,
+    ],
   });
   graph.addEdge({
     source: type.node.id,
@@ -203,11 +219,45 @@ function methodRecord(graph, type, method, disambiguateSignature = false) {
 }
 
 function canonicalStruts2Request(request, struts2RoutesByName) {
-  if (!request.url?.toLowerCase().endsWith(".action")) return request;
-  const actionName = path.posix.basename(request.url).replace(/\.action$/i, "");
-  const candidates = struts2RoutesByName.get(actionName) ?? [];
+  const requestBaseName = path.posix.basename(request.url ?? "");
+  const requestExtension = path.posix.extname(requestBaseName).toLowerCase();
+  const withoutExtension = requestExtension
+    ? requestBaseName.slice(0, -requestExtension.length)
+    : requestBaseName;
+  const dynamicMethodOffset = withoutExtension.indexOf("!");
+  const actionName = dynamicMethodOffset === -1
+    ? withoutExtension
+    : withoutExtension.slice(0, dynamicMethodOffset);
+  if (!actionName) return request;
+  const dispatchMethod = dynamicMethodOffset === -1
+    ? ""
+    : withoutExtension.slice(dynamicMethodOffset + 1);
+  if (dynamicMethodOffset !== -1 && !/^[A-Za-z_$][\w$]*$/u.test(dispatchMethod)) return request;
+  const hintedRequest = dispatchMethod ? { ...request, dispatchMethod } : request;
+  const sourceIsRelative = Object.hasOwn(request, "relativeUrl")
+    || request.struts2ActionRelative === true;
+  const requestActionPath = path.posix.join(path.posix.dirname(request.url), actionName);
+  const candidates = (struts2RoutesByName.get(actionName) ?? []).filter((candidate) => {
+    if (sourceIsRelative) return true;
+    const configuredUrl = candidate.url;
+    const configuredBaseName = path.posix.basename(configuredUrl);
+    const configuredExtension = path.posix.extname(configuredBaseName).toLowerCase();
+    const configuredActionName = configuredExtension
+      ? configuredBaseName.slice(0, -configuredExtension.length)
+      : configuredBaseName;
+    const configuredActionPath = path.posix.join(path.posix.dirname(configuredUrl), configuredActionName);
+    return requestActionPath === configuredActionPath;
+  });
   const urls = [...new Set(candidates.map((candidate) => candidate.url))];
-  return urls.length === 1 ? { ...request, url: urls[0] } : request;
+  if (urls.length !== 1) return hintedRequest;
+  const configuredUrl = urls[0];
+  const configuredBaseName = path.posix.basename(configuredUrl);
+  const configuredExtension = path.posix.extname(configuredBaseName).toLowerCase();
+  const compatibleExtension = requestExtension === ".action"
+    || requestExtension === configuredExtension
+    || (!requestExtension && request.kind === "form");
+  if (!compatibleExtension) return hintedRequest;
+  return { ...hintedRequest, url: configuredUrl };
 }
 
 function materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, pendingJspPages) {
@@ -268,15 +318,33 @@ function queryParameterNames(request) {
 
 function materializedJspRequest(request, preserveLegacySingleForm) {
   if (request.kind !== "form") return request;
-  if (!preserveLegacySingleForm) return { ...request, parametersComplete: true };
+  const { runtimeValueParameterNames: internalRuntimeValueNames, ...materialized } = request;
+  const runtimeValueNames = Array.isArray(internalRuntimeValueNames)
+    ? internalRuntimeValueNames.filter((name) => typeof name === "string" && name)
+    : [];
+  const parameters = { ...(request.parameters ?? {}) };
+  for (const name of runtimeValueNames) {
+    if (Object.hasOwn(parameters, name)) parameters[name] = "";
+  }
+  if (!preserveLegacySingleForm) {
+    return {
+      ...materialized,
+      parameters,
+      parametersComplete: request.parametersComplete === false ? false : true,
+    };
+  }
   const explicitQueryNames = queryParameterNames(request);
+  const retainedEmptyNames = new Set([
+    ...explicitQueryNames,
+    ...runtimeValueNames,
+  ]);
   const hasEmptyExplicitQueryParameter = [...explicitQueryNames].some(
-    (name) => request.parameters?.[name] === "",
+    (name) => parameters[name] === "",
   );
   return {
-    ...request,
+    ...materialized,
     parameters: Object.fromEntries(
-      Object.entries(request.parameters ?? {}).filter(([name, value]) => value !== "" || explicitQueryNames.has(name)),
+      Object.entries(parameters).filter(([name, value]) => value !== "" || retainedEmptyNames.has(name)),
     ),
     ...(hasEmptyExplicitQueryParameter ? { parametersComplete: false } : {}),
   };
@@ -371,7 +439,14 @@ function materializeJava(graph, record, file, sourceFile, resolverFacts) {
       filePath: file.path,
       evidence: [type.evidence],
       data: { kind: type.kind, packageName: parsed.packageName, extendsType: type.extendsType, implementsTypes: type.implementsTypes },
-      searchText: [file.path, type.name, type.fullName, type.extendsType, ...type.implementsTypes],
+      searchText: [
+        file.path,
+        type.name,
+        type.fullName,
+        ...(type.canonicalName ? [type.canonicalName] : []),
+        type.extendsType,
+        ...type.implementsTypes,
+      ],
     });
     graph.addEdge({ source: sourceFile.id, target: node.id, type: "contains", confidence: 1, reason: "Java type" });
     const typeRecord = { ...type, node, methods: [] };
@@ -419,6 +494,25 @@ function tileNode(graph, name, evidence, filePath = "") {
     evidence: evidence ? [evidence] : [],
     searchText: [name],
   });
+}
+
+function configuredOutcomeData(framework, name) {
+  return {
+    outcome: {
+      framework,
+      name,
+      classification: "configured-candidate",
+      codeEvidence: [],
+    },
+  };
+}
+
+function configuredNameCounts(outcomes) {
+  const counts = new Map();
+  for (const outcome of outcomes) {
+    counts.set(outcome.name, (counts.get(outcome.name) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function materializeSql(graph, record, file, sourceFile, resolverFacts) {
@@ -486,18 +580,35 @@ function materializeXml(graph, record, file, sourceFile, resolverFacts, pageFile
   if (struts) {
     for (const action of struts.actions) {
       const routeNode = addRoute(graph, sourceFile, { url: action.url, evidence: action.evidence, source: "Struts action", kind: "struts" }, "contains");
-      resolverFacts.routeTargets.push({
+      const routeTarget = {
         routeNode,
         targetClass: action.type,
         source: "Struts action mapping",
         evidence: action.evidence,
         dispatchParameter: action.parameter,
-      });
+        framework: "struts1",
+        configuredOutcomes: [],
+      };
+      resolverFacts.routeTargets.push(routeTarget);
+      const nameCounts = configuredNameCounts(action.forwards);
       for (const forward of action.forwards) {
         const tileName = tileNameForPath(forward.path);
         if (tileName && tileDefinitionNames.has(tileName)) {
           const tile = tileNode(graph, tileName, forward.evidence);
-          graph.addEdge({ source: routeNode.id, target: tile.id, type: "uses_tile", confidence: 1, reason: `Struts forward ${forward.name} resolves to Tiles definition`, evidence: [forward.evidence] });
+          const outcomeEdge = graph.addEdge({
+            source: routeNode.id,
+            target: tile.id,
+            type: "uses_tile",
+            confidence: 1,
+            reason: `Struts forward ${forward.name} resolves to Tiles definition`,
+            evidence: [forward.evidence],
+            data: configuredOutcomeData("struts1", forward.name),
+          });
+          routeTarget.configuredOutcomes.push({
+            edgeId: outcomeEdge.id,
+            name: forward.name,
+            nameUnique: nameCounts.get(forward.name) === 1,
+          });
           continue;
         }
         const forwardWebPath = normalizeRequestUrl(forward.path);
@@ -510,21 +621,38 @@ function materializeXml(graph, record, file, sourceFile, resolverFacts, pageFile
           evidence: [forward.evidence],
           searchText: [forward.name, forward.path, realPagePath],
         });
-        graph.addEdge({ source: routeNode.id, target: page.id, type: "forwards_to", confidence: 1, reason: `Struts forward ${forward.name}`, evidence: [forward.evidence] });
+        const outcomeEdge = graph.addEdge({
+          source: routeNode.id,
+          target: page.id,
+          type: "forwards_to",
+          confidence: 1,
+          reason: `Struts forward ${forward.name}`,
+          evidence: [forward.evidence],
+          data: configuredOutcomeData("struts1", forward.name),
+        });
+        routeTarget.configuredOutcomes.push({
+          edgeId: outcomeEdge.id,
+          name: forward.name,
+          nameUnique: nameCounts.get(forward.name) === 1,
+        });
       }
     }
   }
   if (struts2) {
     for (const action of struts2.actions) {
       const routeNode = addRoute(graph, sourceFile, { url: action.url, evidence: action.evidence, source: "Struts 2 action", kind: "struts2" }, "contains");
-      resolverFacts.routeTargets.push({
+      const routeTarget = {
         routeNode,
         targetClass: action.className,
         source: "Struts 2 action mapping",
         evidence: action.evidence,
         dispatchMethod: action.method,
         dispatchMethodExplicit: action.methodExplicit,
-      });
+        framework: "struts2",
+        configuredOutcomes: [],
+      };
+      resolverFacts.routeTargets.push(routeTarget);
+      const nameCounts = configuredNameCounts(action.results);
       for (const result of action.results) {
         if (!result.path) continue;
         if (result.type.toLowerCase() === "redirectaction") {
@@ -534,11 +662,37 @@ function materializeXml(graph, record, file, sourceFile, resolverFacts, pageFile
           const extension = action.extension ?? ".action";
           const targetUrl = `${prefix}/${actionName}${actionName.toLowerCase().endsWith(extension.toLowerCase()) ? "" : extension}`.replace(/\/{2,}/g, "/");
           const targetRoute = graph.addNode({ type: "route", key: targetUrl, name: targetUrl, evidence: [result.evidence], searchText: [targetUrl, "Struts 2 redirectAction"] });
-          graph.addEdge({ source: routeNode.id, target: targetRoute.id, type: "redirects_to", confidence: 1, reason: `Struts 2 redirectAction result ${result.name}`, evidence: [result.evidence] });
+          const outcomeEdge = graph.addEdge({
+            source: routeNode.id,
+            target: targetRoute.id,
+            type: "redirects_to",
+            confidence: 1,
+            reason: `Struts 2 redirectAction result ${result.name}`,
+            evidence: [result.evidence],
+            data: configuredOutcomeData("struts2", result.name),
+          });
+          routeTarget.configuredOutcomes.push({
+            edgeId: outcomeEdge.id,
+            name: result.name,
+            nameUnique: nameCounts.get(result.name) === 1,
+          });
           continue;
         }
         const page = pageNodeForPath(graph, result.path, result.evidence, pageFileByWebPath, [result.name, result.type]);
-        graph.addEdge({ source: routeNode.id, target: page.id, type: "forwards_to", confidence: 1, reason: `Struts 2 result ${result.name}`, evidence: [result.evidence] });
+        const outcomeEdge = graph.addEdge({
+          source: routeNode.id,
+          target: page.id,
+          type: "forwards_to",
+          confidence: 1,
+          reason: `Struts 2 result ${result.name}`,
+          evidence: [result.evidence],
+          data: configuredOutcomeData("struts2", result.name),
+        });
+        routeTarget.configuredOutcomes.push({
+          edgeId: outcomeEdge.id,
+          name: result.name,
+          nameUnique: nameCounts.get(result.name) === 1,
+        });
       }
     }
   }
@@ -596,6 +750,98 @@ function fileFromRecord(record) {
     category: record.category,
     size: record.size,
   };
+}
+
+function compareEvidence(left, right) {
+  return String(left.file ?? "").localeCompare(String(right.file ?? ""), "en")
+    || (left.line ?? 0) - (right.line ?? 0)
+    || (left.column ?? 0) - (right.column ?? 0)
+    || String(left.snippet ?? "").localeCompare(String(right.snippet ?? ""), "en");
+}
+
+function uniqueEvidence(entries) {
+  const byLocation = new Map();
+  for (const entry of entries) {
+    if (!entry || typeof entry.file !== "string" || !Number.isInteger(entry.line)) continue;
+    const key = `${entry.file}\0${entry.line}\0${entry.column ?? 0}\0${entry.snippet ?? ""}`;
+    if (!byLocation.has(key)) byLocation.set(key, entry);
+  }
+  return [...byLocation.values()].sort(compareEvidence);
+}
+
+function classifyStrutsOutcomes(graph, resolverFacts) {
+  const typesByNodeId = new Map();
+  const methodsByNodeId = new Map();
+  for (const javaFile of resolverFacts.javaFiles) {
+    for (const type of javaFile.types) {
+      const typeRecords = typesByNodeId.get(type.node.id) ?? [];
+      typeRecords.push(type);
+      typesByNodeId.set(type.node.id, typeRecords);
+      for (const method of type.methods) {
+        const methodRecords = methodsByNodeId.get(method.node.id) ?? [];
+        methodRecords.push(method);
+        methodsByNodeId.set(method.node.id, methodRecords);
+      }
+    }
+  }
+  const configuredOutcomeEdgeIds = new Set(
+    resolverFacts.routeTargets
+      .filter((routeTarget) => routeTarget.framework)
+      .flatMap((routeTarget) => routeTarget.configuredOutcomes.map((outcome) => outcome.edgeId)),
+  );
+  for (const edgeId of configuredOutcomeEdgeIds) {
+    const edge = graph.edges.get(edgeId);
+    if (!edge?.data?.outcome) continue;
+    edge.data.outcome = {
+      ...edge.data.outcome,
+      classification: "configured-candidate",
+      codeEvidence: [],
+    };
+  }
+
+  const strutsTargetsByRoute = new Map();
+  for (const routeTarget of resolverFacts.routeTargets) {
+    if (!routeTarget.framework) continue;
+    const targets = strutsTargetsByRoute.get(routeTarget.routeNode.id) ?? [];
+    targets.push(routeTarget);
+    strutsTargetsByRoute.set(routeTarget.routeNode.id, targets);
+  }
+
+  for (const targets of strutsTargetsByRoute.values()) {
+    if (targets.length !== 1) continue;
+    const routeTarget = targets[0];
+    const resolution = routeTarget.resolutionByRouteId?.get(routeTarget.routeNode.id);
+    if (!resolution
+      || resolution.mappedTypeIds.size !== 1
+      || resolution.mappingEdgeIds.size !== 1
+      || resolution.dispatchedMethodIds.size !== 1
+      || resolution.dispatchEdgeIds.size !== 1) continue;
+    const mappedTypes = typesByNodeId.get([...resolution.mappedTypeIds][0]) ?? [];
+    const dispatchedMethods = methodsByNodeId.get([...resolution.dispatchedMethodIds][0]) ?? [];
+    if (mappedTypes.length !== 1
+      || (mappedTypes[0].topLevel === false && mappedTypes[0].staticMember !== true)
+      || dispatchedMethods.length !== 1) continue;
+    const dispatchedMethod = dispatchedMethods[0];
+
+    const expectedKind = routeTarget.framework === "struts1"
+      ? "struts1-find-forward"
+      : "string-literal";
+    const returnedResults = (dispatchedMethod.returnedResults ?? [])
+      .filter((result) => result.kind === expectedKind);
+
+    for (const configured of routeTarget.configuredOutcomes) {
+      if (!configured.nameUnique || !isValidOutcomeName(configured.name)) continue;
+      const matches = returnedResults.filter((result) => result.name === configured.name);
+      if (matches.length === 0) continue;
+      const edge = graph.edges.get(configured.edgeId);
+      if (!edge?.data?.outcome) continue;
+      edge.data.outcome = {
+        ...edge.data.outcome,
+        classification: "code-confirmed",
+        codeEvidence: uniqueEvidence(matches.map((result) => result.evidence)),
+      };
+    }
+  }
 }
 
 export function materializeRecords({ projectRoot, records, skipped = [] }) {
@@ -680,5 +926,6 @@ export function materializeRecords({ projectRoot, records, skipped = [] }) {
   );
   materializeJavaScriptRequests(graph, javaScriptRequests, loadingContextsByScript, struts2RoutesByName);
   resolveFacts(graph, resolverFacts);
+  classifyStrutsOutcomes(graph, resolverFacts);
   return graph.toJSON();
 }

@@ -112,6 +112,454 @@ test("resolver keeps interface arity and unique-method heuristic semantics", () 
   assert.equal(callEdges[0].reason, "unique method-name heuristic");
 });
 
+test("resolver uses canonical member-type imports without global member fallback", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const member = type(graph, "com.acme.Container$Service", [
+    { name: "work", arity: 0, line: 1 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.Container.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const unrelated = type(graph, "com.other.OtherService", [
+    { name: "work", arity: 0, line: 2 },
+  ]);
+  const caller = type(graph, "caller.Caller", [
+    { name: "run", arity: 0, line: 3 },
+  ]);
+  const callerFile = javaFile([caller], {
+    packageName: "caller",
+    imports: ["com.acme.Container.Service"],
+    fields: [{ ownerType: caller.fullName, name: "service", type: "Service" }],
+    calls: [{
+      ownerType: caller.fullName,
+      receiver: "service",
+      method: "work",
+      enclosingMethod: "run",
+      evidence: { file: "Caller.java", line: 4, column: 1, snippet: "service.work()" },
+    }],
+  });
+  const facts = {
+    javaFiles: [javaFile([member]), javaFile([unrelated]), callerFile],
+    statements: [],
+    routeTargets: [],
+  };
+
+  const indexes = buildResolverIndexes(graph, facts);
+  assert.deepEqual(indexes.typesByCanonical.get(member.canonicalName), [member]);
+
+  resolveFacts(graph, facts);
+
+  const callEdges = [...graph.edges.values()].filter((candidate) => candidate.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [[
+    caller.methods[0].node.id,
+    member.methods[0].node.id,
+  ]]);
+});
+
+test("resolver qualifies member types from the imported enclosing type", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const container = type(graph, "com.acme.Container", [], {
+    canonicalName: "com.acme.Container",
+    topLevel: true,
+  });
+  const member = type(graph, "com.acme.Container$Service", [
+    { name: "work", arity: 0, line: 1 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.Container.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const unrelated = type(graph, "com.other.Service", [
+    { name: "work", arity: 0, line: 2 },
+  ], {
+    canonicalName: "com.other.Service",
+    topLevel: true,
+  });
+  const caller = type(graph, "caller.Caller", [
+    { name: "run", arity: 0, line: 3 },
+  ]);
+  const callerFile = javaFile([caller], {
+    packageName: "caller",
+    imports: ["com.acme.Container", "com.other.Service"],
+    fields: [{ ownerType: caller.fullName, name: "service", type: "Container.Service" }],
+    calls: [{
+      ownerType: caller.fullName,
+      receiver: "service",
+      method: "work",
+      enclosingMethod: "run",
+      evidence: { file: "Caller.java", line: 4, column: 1, snippet: "service.work()" },
+    }],
+  });
+
+  resolveFacts(graph, {
+    javaFiles: [javaFile([container, member]), javaFile([unrelated]), callerFile],
+    statements: [],
+    routeTargets: [],
+  });
+
+  const callEdges = [...graph.edges.values()].filter((candidate) => candidate.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [[
+    caller.methods[0].node.id,
+    member.methods[0].node.id,
+  ]]);
+});
+
+test("resolver finds member types through lexical owners and type wildcard imports", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const container = type(graph, "com.acme.Container", [
+    { name: "run", arity: 0, line: 1 },
+  ], { canonicalName: "com.acme.Container", topLevel: true });
+  const client = type(graph, "com.acme.Container$Client", [
+    { name: "run", arity: 0, line: 2 },
+  ], {
+    name: "Client",
+    canonicalName: "com.acme.Container.Client",
+    topLevel: false,
+    staticMember: true,
+  });
+  const service = type(graph, "com.acme.Container$Service", [
+    { name: "work", arity: 0, line: 3 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.Container.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const unrelated = type(graph, "com.other.OtherService", [
+    { name: "work", arity: 0, line: 4 },
+  ]);
+  const wildcardCaller = type(graph, "caller.WildcardCaller", [
+    { name: "run", arity: 0, line: 5 },
+  ]);
+  const containerFile = javaFile([container, client, service], {
+    fields: [
+      { ownerType: container.fullName, name: "service", type: "Service" },
+      { ownerType: client.fullName, name: "service", type: "Service" },
+    ],
+    calls: [
+      { ownerType: container.fullName, receiver: "service", method: "work", enclosingMethod: "run", evidence: { file: "Container.java", line: 6, column: 1, snippet: "service.work()" } },
+      { ownerType: client.fullName, receiver: "service", method: "work", enclosingMethod: "run", evidence: { file: "Container.java", line: 7, column: 1, snippet: "service.work()" } },
+    ],
+  });
+  const wildcardFile = javaFile([wildcardCaller], {
+    packageName: "caller",
+    imports: ["com.acme.Container.*"],
+    fields: [{ ownerType: wildcardCaller.fullName, name: "service", type: "Service" }],
+    calls: [{ ownerType: wildcardCaller.fullName, receiver: "service", method: "work", enclosingMethod: "run", evidence: { file: "WildcardCaller.java", line: 6, column: 1, snippet: "service.work()" } }],
+  });
+
+  resolveFacts(graph, {
+    javaFiles: [containerFile, javaFile([unrelated]), wildcardFile],
+    statements: [],
+    routeTargets: [],
+  });
+
+  const callEdges = [...graph.edges.values()].filter((candidate) => candidate.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [
+    [container.methods[0].node.id, service.methods[0].node.id],
+    [client.methods[0].node.id, service.methods[0].node.id],
+    [wildcardCaller.methods[0].node.id, service.methods[0].node.id],
+  ]);
+});
+
+test("resolver finds member types inherited from superclasses and interfaces", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const base = type(graph, "com.acme.Base", [], {
+    canonicalName: "com.acme.Base",
+    topLevel: true,
+  });
+  const baseService = type(graph, "com.acme.Base$Service", [
+    { name: "work", arity: 0, line: 1 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.Base.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const child = type(graph, "com.acme.Child", [
+    { name: "run", arity: 0, line: 2 },
+  ], {
+    canonicalName: "com.acme.Child",
+    topLevel: true,
+    extendsType: "Base",
+  });
+  const contract = type(graph, "com.acme.Contract", [], {
+    kind: "interface",
+    canonicalName: "com.acme.Contract",
+    topLevel: true,
+  });
+  const contractService = type(graph, "com.acme.Contract$Service", [
+    { name: "work", arity: 0, line: 3 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.Contract.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const implementation = type(graph, "com.acme.Implementation", [
+    { name: "run", arity: 0, line: 4 },
+  ], {
+    canonicalName: "com.acme.Implementation",
+    topLevel: true,
+    implementsTypes: ["Contract"],
+  });
+  const unrelated = type(graph, "com.other.OtherService", [
+    { name: "work", arity: 0, line: 5 },
+  ]);
+  const childFile = javaFile([child], {
+    fields: [{ ownerType: child.fullName, name: "service", type: "Service" }],
+    calls: [{ ownerType: child.fullName, receiver: "service", method: "work", enclosingMethod: "run", evidence: { file: "Child.java", line: 6, column: 1, snippet: "service.work()" } }],
+  });
+  const implementationFile = javaFile([implementation], {
+    fields: [{ ownerType: implementation.fullName, name: "service", type: "Service" }],
+    calls: [{ ownerType: implementation.fullName, receiver: "service", method: "work", enclosingMethod: "run", evidence: { file: "Implementation.java", line: 7, column: 1, snippet: "service.work()" } }],
+  });
+
+  resolveFacts(graph, {
+    javaFiles: [
+      javaFile([base, baseService]),
+      childFile,
+      javaFile([contract, contractService]),
+      implementationFile,
+      javaFile([unrelated]),
+    ],
+    statements: [],
+    routeTargets: [],
+  });
+
+  const callEdges = [...graph.edges.values()].filter((candidate) => candidate.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [
+    [child.methods[0].node.id, baseService.methods[0].node.id],
+    [implementation.methods[0].node.id, contractService.methods[0].node.id],
+  ]);
+});
+
+test("resolver checks inherited member types at each enclosing lexical scope", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const baseOne = type(graph, "com.acme.BaseOne", [], {
+    canonicalName: "com.acme.BaseOne",
+    topLevel: true,
+  });
+  const baseOneService = type(graph, "com.acme.BaseOne$Service", [
+    { name: "workOne", arity: 0, line: 1 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.BaseOne.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const outerOne = type(graph, "com.acme.OuterOne", [], {
+    canonicalName: "com.acme.OuterOne",
+    topLevel: true,
+    extendsType: "BaseOne",
+  });
+  const innerOne = type(graph, "com.acme.OuterOne$Inner", [
+    { name: "run", arity: 0, line: 2 },
+  ], {
+    name: "Inner",
+    canonicalName: "com.acme.OuterOne.Inner",
+    topLevel: false,
+  });
+  const otherOne = type(graph, "com.other.OtherOne", [
+    { name: "workOne", arity: 0, line: 3 },
+  ]);
+
+  const baseTwo = type(graph, "com.acme.BaseTwo", [], {
+    canonicalName: "com.acme.BaseTwo",
+    topLevel: true,
+  });
+  const baseTwoService = type(graph, "com.acme.BaseTwo$Service", [
+    { name: "workTwo", arity: 0, line: 4 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.BaseTwo.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const outerTwo = type(graph, "com.acme.OuterTwo", [], {
+    canonicalName: "com.acme.OuterTwo",
+    topLevel: true,
+  });
+  const outerTwoService = type(graph, "com.acme.OuterTwo$Service", [
+    { name: "workTwo", arity: 0, line: 5 },
+  ], {
+    name: "Service",
+    canonicalName: "com.acme.OuterTwo.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const innerTwo = type(graph, "com.acme.OuterTwo$Inner", [
+    { name: "run", arity: 0, line: 6 },
+  ], {
+    name: "Inner",
+    canonicalName: "com.acme.OuterTwo.Inner",
+    topLevel: false,
+    extendsType: "BaseTwo",
+  });
+
+  const outerOneFile = javaFile([outerOne, innerOne], {
+    fields: [{ ownerType: innerOne.fullName, name: "service", type: "Service" }],
+    calls: [{
+      ownerType: innerOne.fullName,
+      receiver: "service",
+      method: "workOne",
+      enclosingMethod: "run",
+      evidence: { file: "OuterOne.java", line: 7, column: 1, snippet: "service.workOne()" },
+    }],
+  });
+  const outerTwoFile = javaFile([outerTwo, outerTwoService, innerTwo], {
+    fields: [{ ownerType: innerTwo.fullName, name: "service", type: "Service" }],
+    calls: [{
+      ownerType: innerTwo.fullName,
+      receiver: "service",
+      method: "workTwo",
+      enclosingMethod: "run",
+      evidence: { file: "OuterTwo.java", line: 8, column: 1, snippet: "service.workTwo()" },
+    }],
+  });
+
+  resolveFacts(graph, {
+    javaFiles: [
+      javaFile([baseOne, baseOneService]),
+      outerOneFile,
+      javaFile([otherOne], { packageName: "com.other" }),
+      javaFile([baseTwo, baseTwoService]),
+      outerTwoFile,
+    ],
+    statements: [],
+    routeTargets: [],
+  });
+
+  const callEdges = [...graph.edges.values()].filter((candidate) => candidate.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [
+    [innerOne.methods[0].node.id, baseOneService.methods[0].node.id],
+    [innerTwo.methods[0].node.id, baseTwoService.methods[0].node.id],
+  ]);
+});
+
+test("resolver excludes the current class body when resolving its supertype header", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const route = graph.addNode({ type: "route", key: "/child", name: "/child" });
+  const base = type(graph, "p.Base", [
+    { name: "execute", arity: 0, line: 1 },
+  ], {
+    canonicalName: "p.Base",
+    topLevel: true,
+  });
+  const baseService = type(graph, "p.Base$Service", [
+    { name: "work", arity: 0, line: 2 },
+  ], {
+    name: "Service",
+    canonicalName: "p.Base.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const child = type(graph, "p.Child", [
+    { name: "run", arity: 0, line: 3 },
+  ], {
+    canonicalName: "p.Child",
+    topLevel: true,
+    extendsType: "Base",
+  });
+  const shadowingBase = type(graph, "p.Child$Base", [], {
+    name: "Base",
+    canonicalName: "p.Child.Base",
+    topLevel: false,
+    staticMember: true,
+  });
+  const shadowingService = type(graph, "p.Child$Base$Service", [
+    { name: "work", arity: 0, line: 4 },
+  ], {
+    name: "Service",
+    canonicalName: "p.Child.Base.Service",
+    topLevel: false,
+    staticMember: true,
+  });
+  const childFile = javaFile([child, shadowingBase, shadowingService], {
+    packageName: "p",
+    fields: [{ ownerType: child.fullName, name: "service", type: "Service" }],
+    calls: [{
+      ownerType: child.fullName,
+      receiver: "service",
+      method: "work",
+      enclosingMethod: "run",
+      evidence: { file: "Child.java", line: 4, column: 1, snippet: "service.work()" },
+    }],
+  });
+
+  resolveFacts(graph, {
+    javaFiles: [
+      javaFile([base, baseService], { packageName: "p" }),
+      childFile,
+    ],
+    statements: [],
+    routeTargets: [{
+      routeNode: route,
+      targetClass: child.fullName,
+      source: "Struts action mapping",
+      evidence: { file: "struts.xml", line: 1, column: 1, snippet: "child" },
+    }],
+  });
+
+  const callEdges = [...graph.edges.values()].filter((candidate) => candidate.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [[
+    child.methods[0].node.id,
+    baseService.methods[0].node.id,
+  ]]);
+  const dispatches = [...graph.edges.values()].filter((candidate) => candidate.type === "dispatches_to");
+  assert.deepEqual(dispatches.map(({ target }) => target), [base.methods[0].node.id]);
+});
+
+test("resolver excludes the implementing class body when resolving its interface header", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const contract = type(graph, "p.Contract", [
+    { name: "save", arity: 0, line: 1 },
+  ], {
+    kind: "interface",
+    canonicalName: "p.Contract",
+    topLevel: true,
+  });
+  const implementation = type(graph, "p.Implementation", [
+    { name: "save", arity: 0, line: 2 },
+  ], {
+    canonicalName: "p.Implementation",
+    topLevel: true,
+    implementsTypes: ["Contract"],
+  });
+  const shadowingContract = type(graph, "p.Implementation$Contract", [], {
+    kind: "interface",
+    name: "Contract",
+    canonicalName: "p.Implementation.Contract",
+    topLevel: false,
+    staticMember: true,
+  });
+
+  resolveFacts(graph, {
+    javaFiles: [
+      javaFile([contract], { packageName: "p" }),
+      javaFile([implementation, shadowingContract], { packageName: "p" }),
+    ],
+    statements: [],
+    routeTargets: [],
+  });
+
+  const relations = [...graph.edges.values()].filter((edge) => edge.type === "implements");
+  assert.deepEqual(relations.map(({ source, target }) => [source, target]), [[
+    implementation.node.id,
+    contract.node.id,
+  ]]);
+  const methodRelations = [...graph.edges.values()].filter((edge) => (
+    edge.type === "implemented_by" && edge.source.startsWith("java_method:")
+  ));
+  assert.deepEqual(methodRelations.map(({ source, target }) => [source, target]), [[
+    contract.methods[0].node.id,
+    implementation.methods[0].node.id,
+  ]]);
+});
+
 test("resolver matches same-arity interface overloads by parameter signature", () => {
   const graph = new GraphBuilder({ projectRoot: "/repo" });
   const contract = type(graph, "com.acme.Contract", [
@@ -484,6 +932,50 @@ test("resolver preserves exact and wildcard route matching order", () => {
   const mappings = [...graph.edges.values()].filter((edge) => edge.type === "maps_to");
   assert.deepEqual(mappings.map((edge) => edge.source), [exact.id, wildcard.id, concrete.id]);
   assert.deepEqual(mappings.map((edge) => edge.evidence[0].line), [1, 2, 2]);
+});
+
+test("resolver maps only class route targets and requires an exact static member name", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const exactRoute = graph.addNode({ type: "route", key: "/exact", name: "/exact" });
+  const simpleRoute = graph.addNode({ type: "route", key: "/simple", name: "/simple" });
+  const interfaceRoute = graph.addNode({ type: "route", key: "/contract", name: "/contract" });
+  const member = type(graph, "com.acme.Container$OrderAction", [], {
+    kind: "class",
+    name: "OrderAction",
+    topLevel: false,
+    staticMember: true,
+  });
+  const contract = type(graph, "com.acme.ActionContract", [], { kind: "interface" });
+
+  resolveFacts(graph, {
+    javaFiles: [javaFile([member, contract])],
+    statements: [],
+    routeTargets: [
+      {
+        routeNode: exactRoute,
+        targetClass: member.fullName,
+        source: "Struts action mapping",
+        evidence: { file: "struts.xml", line: 1, column: 1, snippet: "exact" },
+      },
+      {
+        routeNode: simpleRoute,
+        targetClass: "OrderAction",
+        source: "Struts action mapping",
+        evidence: { file: "struts.xml", line: 2, column: 1, snippet: "simple" },
+      },
+      {
+        routeNode: interfaceRoute,
+        targetClass: contract.fullName,
+        source: "Struts action mapping",
+        evidence: { file: "struts.xml", line: 3, column: 1, snippet: "interface" },
+      },
+    ],
+  });
+
+  const mappings = [...graph.edges.values()].filter((edge) => edge.type === "maps_to");
+  assert.deepEqual(mappings.map((edge) => [edge.source, edge.target]), [
+    [exactRoute.id, member.node.id],
+  ]);
 });
 
 test("resolver preserves request hint dispatch order", () => {

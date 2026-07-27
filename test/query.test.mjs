@@ -54,6 +54,29 @@ test("search ranks exact identifiers above fuzzy supporting text", async () => {
   assert.equal(results[0].score > results.at(-1).score, true);
 });
 
+test("search finds member types and methods by their source canonical names", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("src/com/acme/Container.java", "java", [
+      "package com.acme;",
+      "public class Container {",
+      "  public static class Service {",
+      "    public void work() {}",
+      "  }",
+      "}",
+    ].join("\n"))],
+  });
+
+  assert.equal(
+    searchGraph(graph, "com.acme.Container.Service", { types: ["java_type"] })[0]?.id,
+    "java_type:com.acme.Container$Service",
+  );
+  assert.equal(
+    searchGraph(graph, "com.acme.Container.Service.work", { types: ["java_method"] })[0]?.id,
+    "java_method:com.acme.Container$Service#work/0",
+  );
+});
+
 test("search normalizes and tokenizes a query only once", () => {
   let conversions = 0;
   const query = {
@@ -318,6 +341,131 @@ test("Markdown renderer distinguishes proven and heuristic edges and cites sourc
   assert.match(markdown, /确定关系/);
   assert.match(markdown, /启发式关系/);
   assert.match(markdown, /order\.updateStatus/);
+});
+
+test("Markdown renderer never presents configured-only outcomes as proven relations", () => {
+  const route = { id: "route:/save.do", type: "route", name: "/save.do", score: 1000 };
+  const page = { id: "page:web/error.jsp", type: "page", name: "error.jsp" };
+  const edge = {
+    id: "configured-error",
+    source: route.id,
+    target: page.id,
+    type: "forwards_to",
+    confidence: 1,
+    reason: "Struts forward error",
+    evidence: [{ file: "WEB-INF/struts-config.xml", line: 10 }],
+    data: {
+      outcome: {
+        framework: "struts1",
+        name: "error",
+        classification: "configured-candidate",
+        codeEvidence: [],
+      },
+    },
+  };
+  const trace = {
+    mode: "feature",
+    query: "/save.do",
+    matches: [route],
+    nodes: [route, page],
+    edges: [edge],
+    paths: [{ nodes: [route.id, page.id], edges: [edge.type], edgeIds: [edge.id] }],
+    warnings: [],
+  };
+
+  const markdown = renderTraceMarkdown(trace);
+  const proven = markdown.slice(
+    markdown.indexOf("## 确定关系"),
+    markdown.indexOf("## 配置候选关系"),
+  );
+
+  assert.match(markdown, /--forwards_to \[配置候选\]-->/u);
+  assert.match(markdown, /## 配置候选关系/u);
+  assert.match(markdown, /当前索引未能从唯一解析入口确认该配置结果/u);
+  assert.doesNotMatch(markdown, /未发现对应直接返回/u);
+  assert.doesNotMatch(proven, /Struts forward error/u);
+});
+
+test("trace rendering treats incomplete outcome metadata as a configured candidate", () => {
+  const route = { id: "route:/save.do", type: "route", name: "/save.do", score: 1000 };
+  const page = { id: "page:web/saved.jsp", type: "page", name: "saved.jsp" };
+  const codeEvidence = [{ file: "src/SaveAction.java", line: 9 }];
+  const renderOutcome = (outcome) => renderTraceMarkdown({
+    mode: "url",
+    query: "/save.do",
+    matches: [route],
+    nodes: [route, page],
+    edges: [{
+      id: "result",
+      source: route.id,
+      target: page.id,
+      type: "forwards_to",
+      confidence: 1,
+      reason: "success",
+      evidence: [{ file: "WEB-INF/struts-config.xml", line: 4 }],
+      data: { outcome },
+    }],
+    paths: [],
+    warnings: [],
+  });
+
+  for (const metadata of [
+    { name: "success", classification: "code-confirmed", codeEvidence },
+    { framework: "spring", name: "success", classification: "code-confirmed", codeEvidence },
+    { framework: "struts1", name: "", classification: "code-confirmed", codeEvidence },
+    { framework: "struts1", name: "success", classification: "code-confirmed", codeEvidence: [{ file: "src/SaveAction.java", line: 0 }] },
+  ]) {
+    const markdown = renderOutcome(metadata);
+    assert.match(markdown, /--forwards_to \[配置候选\]-->/u);
+    assert.doesNotMatch(markdown, /代码返回可能/u);
+    assert.doesNotMatch(markdown, /代码证据/u);
+  }
+
+  const confirmed = renderOutcome({
+    framework: "struts1",
+    name: "success",
+    classification: "code-confirmed",
+    codeEvidence,
+  });
+  assert.match(confirmed, /--forwards_to \[代码返回可能\]-->/u);
+  assert.match(confirmed, /代码证据 src\/SaveAction[.]java:9/u);
+});
+
+test("candidate trace wording does not claim direct returns are absent when dispatch is ambiguous", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("web/order/edit.jsp", "jsp", [
+        '<html:form action="/order/save" method="post">',
+        '  <html:hidden property="method" value="save" />',
+        "</html:form>",
+        '<html:form action="/order/save" method="post">',
+        '  <html:hidden property="method" value="cancel" />',
+        "</html:form>",
+      ].join("\n"), "markup"),
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction extends DispatchAction {",
+        '  public ActionForward save(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return mapping.findForward("success"); }',
+        '  public ActionForward cancel(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return mapping.findForward("cancelled"); }',
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction' parameter='method'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "    <forward name='cancelled' path='/order/cancelled.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+    ],
+  });
+
+  const markdown = renderTraceMarkdown(traceUrl(graph, "/order/save.do"));
+  assert.match(markdown, /当前索引未能从唯一解析入口确认该配置结果/u);
+  assert.doesNotMatch(markdown, /未发现对应直接返回/u);
+  assert.match(markdown, /Struts forward success/u);
+  assert.match(markdown, /Struts forward cancelled/u);
 });
 
 test("Markdown renderer keeps control characters from forging output structure", () => {

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import { extractJavaScriptRequests, parseJsp } from "../src/parsers/jsp.mjs";
+
+function elapsedCpuMilliseconds(startedAt) {
+  const elapsed = process.cpuUsage(startedAt);
+  return (elapsed.user + elapsed.system) / 1_000;
+}
 
 const fixture = new URL("./fixtures/legacy-shop/web/order/audit.jsp", import.meta.url);
 const jsFixture = new URL("./fixtures/legacy-shop/web/js/order.js", import.meta.url);
@@ -27,14 +31,14 @@ test("JSP parser extracts business text, requests, includes, and fields with evi
   assert.deepEqual(result.includes.map((entry) => entry.path), ["/common/tags.jsp", "/common/header.jsp"]);
   assert.deepEqual(result.scripts.map((entry) => entry.path), ["/js/order.js"]);
   assert.deepEqual(result.fields.map((entry) => [entry.name, entry.value]), [
-    ["orderId", "${order.id}"],
+    ["orderId", ""],
     ["method", "audit"],
     ["decision", "PASS"],
   ]);
   assert.deepEqual(result.requests[0].parameters, {
     decision: "PASS",
     method: "audit",
-    orderId: "${order.id}",
+    orderId: "",
   });
   assert.deepEqual(result.requests[0].evidence, {
     file: "web/order/audit.jsp",
@@ -42,6 +46,120 @@ test("JSP parser extracts business text, requests, includes, and fields with evi
     column: 24,
     snippet: '<form id="auditForm" action="${pageContext.request.contextPath}/order/audit.do" method="post">',
   });
+});
+
+test("JSP parser resolves static nested c:url attributes without inventing template-fragment routes", () => {
+  const result = parseJsp([
+    '<a href="<c:url value="/login.jsp"/>" class="current">Login</a>',
+    '<a href="<c:out value="${link}"/>">Open upload</a>',
+  ].join("\n"), "web/common/menu.jsp");
+
+  assert.deepEqual(
+    result.requests.map(({ kind, url }) => [kind, url]),
+    [["link", "/login.jsp"]],
+  );
+  assert.equal(result.visibleText, "Login Open upload");
+  assert.doesNotMatch(JSON.stringify(result), /%3Cc:(?:url|out)%20value=/u);
+});
+
+test("JSP parser resolves an unquoted static nested c:url form action", () => {
+  const result = parseJsp(
+    '<form action=<c:url value="/save.do"/> method=post></form>',
+    "web/order/edit.jsp",
+  );
+
+  assert.deepEqual(
+    result.requests.map(({ kind, url, method }) => [kind, url, method]),
+    [["form", "/save.do", "POST"]],
+  );
+  assert.doesNotMatch(JSON.stringify(result), /%3Cc:url/u);
+});
+
+test("JSP parser rejects dynamic or malformed unquoted nested c:url form actions", () => {
+  const result = parseJsp([
+    '<form action=<c:url value="${dynamicAction}"/>></form>',
+    '<form action=<c:url value="/broken.do">></form>',
+  ].join("\n"), "web/order/edit.jsp");
+
+  assert.deepEqual(result.requests, []);
+});
+
+test("JSP parser marks only relative Struts 2 tag actions for name-based alignment", () => {
+  const result = parseJsp([
+    '<s:form action="save"></s:form>',
+    '<s:form action="/admin/save"></s:form>',
+    '<s:form action="save" namespace="/review"></s:form>',
+  ].join("\n"), "web/order/edit.jsp");
+
+  assert.deepEqual(
+    result.requests.map(({ url, struts2ActionRelative = false }) => ({ url, struts2ActionRelative })),
+    [
+      { url: "/save.action", struts2ActionRelative: true },
+      { url: "/admin/save.action", struts2ActionRelative: false },
+      { url: "/review/save.action", struts2ActionRelative: false },
+    ],
+  );
+});
+
+test("JSP parser preserves quoted JavaScript comparisons inside attributes", () => {
+  const result = parseJsp(
+    '<form action="/save.do" method="post" onclick="if (a < b && c) submitForm()"></form>',
+    "web/order/edit.jsp",
+  );
+
+  assert.deepEqual(
+    result.requests.map(({ url, method }) => [url, method]),
+    [["/save.do", "POST"]],
+  );
+});
+
+test("JSP parser omits punctuation-only template residue from visible text", () => {
+  const result = parseJsp([
+    '<img src=<c:url value="/images/calendar.gif"/>>',
+    '<span>${dynamicOnly}</span>',
+    '<select name="<c:out value="${leftId}"/>" multiple="multiple" onDblClick="moveSelectedOptions($(\'<c:out value="${rightId}"/>\'))">',
+    '  <option value="all">All patients</option>',
+    '</select>',
+    '<button id="move<c:out value="${count}"/>" type="button" onclick="moveAllOptions()">Move all</button>',
+    '<noscript>&lt;!-- fallback --&gt;&lt;ul&gt;&lt;li&gt;&lt;a href="/all"&gt;Fallback menu&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;</noscript>',
+    '<p>Patient search</p>',
+  ].join("\n"), "web/patient.jsp");
+
+  assert.equal(result.visibleText, "All patients Move all Fallback menu Patient search");
+  assert.deepEqual(
+    result.textEntries.map(({ text }) => text),
+    ["All patients", "Move all", "Fallback menu", "Patient search"],
+  );
+  assert.doesNotMatch(result.visibleText, /multiple=|onclick=|moveAllOptions|<\/?(?:ul|li|a)|fallback --/u);
+});
+
+test("JSP parser omits dynamic field names instead of presenting expressions as literal fields", () => {
+  const result = parseJsp([
+    '<form action="/move.do">',
+    '  <select name="<c:out value="${param.leftId}"/>"></select>',
+    '  <input name="${dynamicName}" value="dynamic">',
+    '  <s:textfield name="%{#request.fieldName}" value="dynamic" />',
+    '  <input name="staticName" value="known">',
+    '</form>',
+  ].join("\n"), "web/pickList.jsp");
+
+  assert.deepEqual(result.fields.map(({ name }) => name), ["staticName"]);
+  assert.deepEqual(result.requests[0].parameters, { staticName: "known" });
+  assert.equal(result.requests[0].parametersComplete, false);
+  assert.equal(result.requests[0].hasDynamicParameterNames, true);
+  assert.deepEqual(result.warnings, [
+    "dynamic JSP field name omitted in web/pickList.jsp at line 2",
+    "dynamic JSP field name omitted in web/pickList.jsp at line 3",
+    "dynamic JSP field name omitted in web/pickList.jsp at line 4",
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), /param\.leftId|dynamicName|fieldName/u);
+});
+
+test("JSP parser preserves quoted visible text containing comparison symbols", () => {
+  const result = parseJsp('<p>"A > B"</p>', "web/comparison.jsp");
+
+  assert.equal(result.visibleText, '"A > B"');
+  assert.deepEqual(result.textEntries.map(({ text }) => text), ['"A > B"']);
 });
 
 test("JavaScript request extraction handles XHR and fetch without query expressions", async () => {
@@ -298,6 +416,62 @@ test("JSP parser extracts Struts taglib fields for dispatch parameters", () => {
   assert.deepEqual(result.requests[0].parameters, { method: "audit", orderId: "" });
 });
 
+test("JSP parser uses a static Struts 2 key as the fallback field binding", () => {
+  const result = parseJsp([
+    '<s:form action="save">',
+    '  <s:hidden key="user.id" value="${user.id}" />',
+    '  <s:textfield key="user.firstName" />',
+    '  <s:select key="user.team" />',
+    '  <s:textfield name="explicit" key="label.only" />',
+    '</s:form>',
+  ].join("\n"), "WebRoot/userForm.jsp");
+
+  assert.deepEqual(result.fields.map(({ name, value }) => [name, value]), [
+    ["user.id", ""],
+    ["user.firstName", ""],
+    ["user.team", ""],
+    ["explicit", ""],
+  ]);
+  assert.deepEqual(result.requests[0].parameters, {
+    explicit: "",
+    "user.firstName": "",
+    "user.id": "",
+    "user.team": "",
+  });
+});
+
+test("JSP parser does not present nested tag output as a static field value", () => {
+  const result = parseJsp(
+    '<form action="/roles.do"><input type="hidden" name="userRoles" value="<s:property value="value"/>"/></form>',
+    "WebRoot/userForm.jsp",
+  );
+
+  assert.deepEqual(result.fields.map(({ name, value }) => [name, value]), [["userRoles", ""]]);
+  assert.deepEqual(result.requests[0].parameters, { userRoles: "" });
+});
+
+test("JSP parser keeps repeated runtime-derived field defaults unresolved", () => {
+  const result = parseJsp([
+    '<form action="/text.do">',
+    '  <input name="mode" value="${runtimeMode}">',
+    '  <input name="mode" value="fixed">',
+    '</form>',
+    '<form action="/choice.do">',
+    '  <input type="checkbox" checked name="flag" value="%{runtimeFlag}">',
+    '  <input type="checkbox" checked name="flag" value="fixed">',
+    '</form>',
+  ].join("\n"), "WebRoot/order/edit.jsp");
+
+  assert.deepEqual(result.requests.map(({ url, parameters }) => [url, parameters]), [
+    ["/text.do", { mode: "" }],
+    ["/choice.do", { flag: "" }],
+  ]);
+  assert.deepEqual(result.requests.map(({ runtimeValueParameterNames }) => runtimeValueParameterNames), [
+    ["mode"],
+    ["flag"],
+  ]);
+});
+
 test("JSP parser masks non-include directives without losing static include directives", () => {
   const content = [
     '<%@ page info="<form action=\'/ghost.do\'><input name=\'ghost\' value=\'x\'></form><a href=\'/ghost-link.do\'>ghost</a>" %>',
@@ -420,8 +594,8 @@ test("JSP parser reads attributes from the original source after structural mask
 
   const result = parseJsp(content, "WebRoot/order/edit.jsp");
 
-  assert.equal(result.fields[0].value, "<%= bean.getId() %>");
-  assert.deepEqual(result.requests[0].parameters, { orderId: "<%= bean.getId() %>" });
+  assert.equal(result.fields[0].value, "");
+  assert.deepEqual(result.requests[0].parameters, { orderId: "" });
 });
 
 test("JSP parser ignores dependencies and JavaScript requests in hidden source regions", () => {
@@ -532,9 +706,9 @@ test("JSP parser keeps raw-text offsets stable after Unicode case expansion", ()
 
 test("JSP parser masks repeated unclosed comments without quadratic rescanning", () => {
   const content = "<%--".repeat(24_000);
-  const startedAt = performance.now();
+  const startedAt = process.cpuUsage();
   const result = parseJsp(content, "WebRoot/unclosed.jsp");
-  const elapsedMs = performance.now() - startedAt;
+  const elapsedMs = elapsedCpuMilliseconds(startedAt);
 
   assert.deepEqual(result.requests, []);
   assert.ok(elapsedMs < 750, `24,000 unclosed comment markers took ${elapsedMs.toFixed(1)} ms`);
@@ -542,9 +716,9 @@ test("JSP parser masks repeated unclosed comments without quadratic rescanning",
 
 test("JSP parser rejects repeated malformed tags without quadratic rescanning", () => {
   const measure = (count) => {
-    const startedAt = performance.now();
+    const startedAt = process.cpuUsage();
     const result = parseJsp("<form ".repeat(count), "WebRoot/malformed.jsp");
-    return { elapsedMs: performance.now() - startedAt, result };
+    return { elapsedMs: elapsedCpuMilliseconds(startedAt), result };
   };
 
   measure(200);
@@ -576,9 +750,9 @@ test("JSP parser keeps scanning after comparison text and rejects invalid marker
   assert.deepEqual(parsed.requests.map(({ url }) => url), ["/found.do"]);
 
   const measure = (count) => {
-    const startedAt = performance.now();
+    const startedAt = process.cpuUsage();
     parseJsp("<1".repeat(count), "WebRoot/invalid.jsp");
-    return performance.now() - startedAt;
+    return elapsedCpuMilliseconds(startedAt);
   };
   measure(500);
   const ratios = [];
@@ -752,6 +926,29 @@ test("JSP parser preserves static and dynamic query parameters on local routes",
     ["form", "/orders.do", { method: "save", id: "8" }],
     ["link", "/orders.do", { id: "" }],
   ]);
+});
+
+test("JSP parser preserves a static route with a scriptlet query value", () => {
+  const result = parseJsp(
+    '<form action="/orders.do?id=<%= bean.getId() %>"></form>',
+    "web/order/edit.jsp",
+  );
+
+  assert.deepEqual(result.requests.map(({ kind, url, parameters }) => [kind, url, parameters]), [
+    ["form", "/orders.do", { id: "" }],
+  ]);
+});
+
+test("JSP parser marks omitted dynamic query parameter names as incomplete", () => {
+  const result = parseJsp(
+    '<form action="/orders.do?${runtimeName}=x&method=save"></form>',
+    "web/order/edit.jsp",
+  );
+
+  assert.deepEqual(result.requests[0].parameters, { method: "save" });
+  assert.deepEqual(result.requests[0].queryParameterNames, ["method"]);
+  assert.equal(result.requests[0].parametersComplete, false);
+  assert.equal(result.requests[0].hasDynamicParameterNames, true);
 });
 
 test("JSP parser accepts common unquoted static attributes", () => {

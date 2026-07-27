@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 
 import { searchGraph, traverseGraph } from "./query.mjs";
+import { normalizeConfiguredOutcome } from "./outcome-metadata.mjs";
 import { effectiveTilePages } from "./tile-composition.mjs";
 
 const MAX_USE_CASES = 200;
 const MAX_PAGES = 200;
 const MAX_TRIGGERS_PER_USE_CASE = 20;
 const MAX_FLOW_STEPS = 24;
+const MAX_ALTERNATE_FLOWS = 8;
 const MAX_ACTIONS_PER_PAGE = 40;
 const MAX_ARRIVALS_PER_PAGE = 20;
 const MAX_TABLES_PER_USE_CASE = 20;
@@ -43,6 +45,16 @@ const PAGE_ARRIVAL_EDGE_TYPES = new Set([
   "uses_template",
 ]);
 const TILE_COMPOSITION_EDGE_TYPES = new Set(["extends_tile", "puts", "uses_template"]);
+const USE_CASE_ENTRY_EDGE_TYPES = new Set(["contains", "redirects_to", "submits_to", "requests"]);
+const DATA_FLOW_NODE_TYPES = new Set(["statement", "procedure", "table"]);
+const BRANCH_DETAIL_NODE_TYPES = new Set([
+  "java_type",
+  "java_method",
+  "page",
+  "route",
+  "tiles_definition",
+  ...DATA_FLOW_NODE_TYPES,
+]);
 
 function compareText(left, right) {
   if (left < right) return -1;
@@ -55,6 +67,50 @@ function firstEvidence(entry) {
   const evidence = Array.isArray(evidenceValue) ? evidenceValue[0] : evidenceValue;
   if (!evidence || typeof evidence.file !== "string" || !Number.isInteger(evidence.line)) return null;
   return { file: evidence.file, line: evidence.line };
+}
+
+function outcomeFields(edge) {
+  const outcome = normalizeConfiguredOutcome(edge);
+  if (!outcome) return {};
+  return {
+    ...(outcome.framework ? { framework: outcome.framework } : {}),
+    resultName: outcome.name,
+    classification: outcome.classification,
+    configEvidence: firstEvidence(edge),
+    codeEvidence: outcome.codeEvidence.map(firstEvidence).filter(Boolean),
+  };
+}
+
+function buildTileArrivalOutcomeIndex(edges, nodeById, outgoingBySource) {
+  const edgeById = new Map(edges.map((edge) => [edge.id, edge]));
+  const ownersByArrivalEdgeId = new Map();
+  for (const edge of edges) {
+    if (edge.type !== "uses_tile" || nodeById.get(edge.target)?.type !== "tiles_definition") continue;
+    for (const composition of effectiveTilePages(edge.target, nodeById, outgoingBySource)) {
+      const arrivalEdge = composition.edges.at(-1);
+      if (!arrivalEdge || !TILE_COMPOSITION_EDGE_TYPES.has(arrivalEdge.type)) continue;
+      const owners = ownersByArrivalEdgeId.get(arrivalEdge.id) ?? new Map();
+      owners.set(edge.id, edge);
+      ownersByArrivalEdgeId.set(arrivalEdge.id, owners);
+    }
+  }
+
+  const outcomes = new Map();
+  for (const [arrivalEdgeId, ownersById] of ownersByArrivalEdgeId) {
+    const owners = [...ownersById.values()];
+    if (owners.length === 1) {
+      outcomes.set(arrivalEdgeId, outcomeFields(owners[0]));
+      continue;
+    }
+    const arrivalEdge = edgeById.get(arrivalEdgeId);
+    outcomes.set(arrivalEdgeId, {
+      resultName: "",
+      classification: "configured-candidate",
+      configEvidence: firstEvidence(arrivalEdge),
+      codeEvidence: [],
+    });
+  }
+  return outcomes;
 }
 
 function moduleNameForRoute(url) {
@@ -114,10 +170,12 @@ function requestHintSignature(hint) {
   );
   return JSON.stringify({
     method: typeof hint?.method === "string" ? hint.method.toUpperCase() : "",
+    dispatchMethod: typeof hint?.dispatchMethod === "string" ? hint.dispatchMethod : "",
     parameters,
     parametersComplete: typeof hint?.parametersComplete === "boolean"
       ? hint.parametersComplete
       : null,
+    hasDynamicParameterNames: hint?.hasDynamicParameterNames === true,
   });
 }
 
@@ -217,15 +275,18 @@ function summarizeRequestHints(hints) {
   const methods = new Set();
   const parameters = new Set();
   let hasUnknownMethod = false;
+  let hasDynamicParameterNames = false;
   for (const hint of hints) {
     if (typeof hint?.method === "string" && hint.method) methods.add(hint.method.toUpperCase());
     else hasUnknownMethod = true;
+    if (hint?.hasDynamicParameterNames === true) hasDynamicParameterNames = true;
     for (const name of Object.keys(hint?.parameters ?? {})) parameters.add(name);
   }
   return {
     methods: [...methods].sort(compareText),
     parameters: [...parameters].sort(compareText),
     hasUnknownMethod,
+    ...(hasDynamicParameterNames ? { hasDynamicParameterNames: true } : {}),
   };
 }
 
@@ -282,6 +343,7 @@ function useCaseOutcomes(route, nodeById, outgoingBySource) {
             1,
           ),
           evidence: firstEvidence(pathEdges.at(-1)) ?? firstEvidence(edge),
+          ...outcomeFields(edge),
         });
       }
       continue;
@@ -298,6 +360,7 @@ function useCaseOutcomes(route, nodeById, outgoingBySource) {
       reason: edge.reason ?? "",
       confidence: typeof edge.confidence === "number" ? edge.confidence : 1,
       evidence: firstEvidence(edge),
+      ...outcomeFields(edge),
     });
   }
   return outcomes.sort((left, right) => compareText(left.reason, right.reason)
@@ -340,9 +403,10 @@ function useCaseInputs(triggers, nodeById, outgoingBySource, requestHintsByTrigg
     for (const hint of hints) {
       const parameters = new Set(summarizeRequestHints([hint]).parameters);
       const complete = requestParametersComplete([hint]);
+      const hasDynamicParameterNames = hint?.hasDynamicParameterNames === true;
       const sourcePageId = requestHintPageId(hint, pageIdByPath);
       if (sourcePageId !== null) {
-        mergePageScope(sourcePageId, complete ? parameters : null);
+        mergePageScope(sourcePageId, complete || hasDynamicParameterNames ? parameters : null);
       } else if (!complete && hint?.parametersComplete !== false) {
         needsOwnerFallback = true;
       }
@@ -414,25 +478,50 @@ function buildUseCase(
   const edgeById = new Map(traversal.edges.map((edge) => [edge.id, edge]));
   const mainPath = traversal.paths[0] ?? { nodes: [route.id], edges: [], edgeIds: [] };
 
-  let minConfidence = 1;
-  const mainFlow = [];
-  const flowNodeIds = mainPath.nodes.slice(0, MAX_FLOW_STEPS);
-  for (let index = 0; index < flowNodeIds.length; index += 1) {
-    const node = nodeById.get(flowNodeIds[index]);
-    const viaEdge = index > 0 ? edgeById.get(mainPath.edgeIds[index - 1]) : null;
-    if (viaEdge && typeof viaEdge.confidence === "number") {
-      minConfidence = Math.min(minConfidence, viaEdge.confidence);
+  const flowSteps = (flowPath) => {
+    const steps = [];
+    const flowNodeIds = flowPath.nodes.slice(0, MAX_FLOW_STEPS);
+    for (let index = 0; index < flowNodeIds.length; index += 1) {
+      const node = nodeById.get(flowNodeIds[index]);
+      const viaEdge = index > 0 ? edgeById.get(flowPath.edgeIds[index - 1]) : null;
+      steps.push({
+        index: index + 1,
+        nodeId: flowNodeIds[index],
+        nodeType: node?.type ?? "unknown",
+        name: node?.name ?? flowNodeIds[index],
+        via: viaEdge?.type ?? null,
+        confidence: typeof viaEdge?.confidence === "number" ? viaEdge.confidence : 1,
+        evidence: firstEvidence(viaEdge) ?? firstEvidence(node),
+        ...outcomeFields(viaEdge),
+      });
     }
-    mainFlow.push({
-      index: index + 1,
-      nodeId: flowNodeIds[index],
-      nodeType: node?.type ?? "unknown",
-      name: node?.name ?? flowNodeIds[index],
-      via: viaEdge?.type ?? null,
-      confidence: typeof viaEdge?.confidence === "number" ? viaEdge.confidence : 1,
-      evidence: firstEvidence(viaEdge) ?? firstEvidence(node),
-    });
+    return steps;
+  };
+  const mainFlow = flowSteps(mainPath);
+  const flowConfidence = (steps) => steps.reduce(
+    (minimum, step) => Math.min(minimum, step.confidence),
+    1,
+  );
+  const minConfidence = flowConfidence(mainFlow);
+  const representedBranchNodes = new Set(
+    mainFlow
+      .filter((step, index) => index > 0 && BRANCH_DETAIL_NODE_TYPES.has(step.nodeType))
+      .map((step) => step.nodeId),
+  );
+  const alternateFlowCandidates = [];
+  for (const flowPath of traversal.paths.slice(1)) {
+    const branchNodeIds = flowPath.nodes.slice(1).filter((nodeId) => (
+      BRANCH_DETAIL_NODE_TYPES.has(nodeById.get(nodeId)?.type)
+    ));
+    if (branchNodeIds.length === 0
+      || branchNodeIds.every((nodeId) => representedBranchNodes.has(nodeId))) {
+      continue;
+    }
+    alternateFlowCandidates.push(flowPath);
+    for (const nodeId of branchNodeIds) representedBranchNodes.add(nodeId);
   }
+  const alternateFlows = alternateFlowCandidates.slice(0, MAX_ALTERNATE_FLOWS).map(flowSteps);
+  const alternateFlowConfidences = alternateFlows.map(flowConfidence);
 
   const tableAccess = new Map();
   for (const edge of traversal.edges) {
@@ -470,7 +559,12 @@ function buildUseCase(
     ),
     outcomes: useCaseOutcomes(route, nodeById, outgoingBySource),
     mainFlow,
-    flowTruncated: flowDisplayTruncated || flowTraversalTruncated,
+    alternateFlows,
+    alternateFlowConfidences,
+    alternateFlowsTruncated: alternateFlowCandidates.length > MAX_ALTERNATE_FLOWS,
+    flowTruncated: flowDisplayTruncated
+      || flowTraversalTruncated
+      || alternateFlowCandidates.length > MAX_ALTERNATE_FLOWS,
     flowDisplayTruncated,
     flowTraversalTruncated,
     statements: useCaseStatements(traversal),
@@ -496,7 +590,14 @@ function pageFieldSpecs(page, defaultCandidates) {
   });
 }
 
-function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget, requestHintIndexes) {
+function buildPageSpec(
+  page,
+  nodeById,
+  outgoingBySource,
+  incomingByTarget,
+  requestHintIndexes,
+  tileArrivalOutcomes,
+) {
   const actions = [];
   const defaultCandidates = new Map();
   const actionEdges = (outgoingBySource.get(page.id) ?? [])
@@ -533,6 +634,8 @@ function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget, reque
         kind: edge.type,
         target: target.name,
         targetId: target.id,
+        targetType: target.type,
+        confidence: typeof edge.confidence === "number" ? edge.confidence : 1,
         method: methods.join("/"),
         evidence: firstEvidence(hint) ?? firstEvidence(edge),
       });
@@ -554,11 +657,14 @@ function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget, reque
       from: source.name,
       fromType: source.type,
       evidence: firstEvidence(edge),
+      ...outcomeFields(edge),
+      ...(tileArrivalOutcomes.get(edge.id) ?? {}),
     });
   }
   arrivals.sort((left, right) => compareText(left.from, right.from) || compareText(left.kind, right.kind));
 
   return {
+    pageId: page.id,
     filePath: page.filePath ?? page.name,
     name: page.name,
     visibleText: String(page.data?.visibleText ?? ""),
@@ -568,6 +674,11 @@ function buildPageSpec(page, nodeById, outgoingBySource, incomingByTarget, reque
     arrivals: arrivals.slice(0, MAX_ARRIVALS_PER_PAGE),
     arrivalsTruncated: arrivals.length > MAX_ARRIVALS_PER_PAGE,
   };
+}
+
+function isUseCaseRoute(route, incomingByTarget, outgoingBySource) {
+  return (incomingByTarget.get(route.id) ?? []).some((edge) => USE_CASE_ENTRY_EDGE_TYPES.has(edge.type))
+    || (outgoingBySource.get(route.id) ?? []).some((edge) => FLOW_EDGE_TYPES.includes(edge.type));
 }
 
 const MAX_SCOPE_SLUG_CHARACTERS = 48;
@@ -706,6 +817,11 @@ export function buildDocumentModel(graph, options = {}) {
   };
   const orderedEdges = [...graph.edges].sort((left, right) => compareText(left.id, right.id));
   for (const edge of orderedEdges) indexEdge(edge);
+  const tileArrivalOutcomes = buildTileArrivalOutcomeIndex(
+    orderedEdges,
+    nodeById,
+    outgoingBySource,
+  );
 
   for (const loadEdge of orderedEdges) {
     if (loadEdge.type !== "loads_script" || nodeById.get(loadEdge.source)?.type !== "page") continue;
@@ -724,9 +840,10 @@ export function buildDocumentModel(graph, options = {}) {
     }
   }
 
-  const routes = graph.nodes
+  const allRoutes = graph.nodes
     .filter((node) => node.type === "route")
     .sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
+  const routes = allRoutes.filter((route) => isUseCaseRoute(route, incomingByTarget, outgoingBySource));
   const requestHintIndexes = new Map();
   let scope = null;
   let routeCandidates = routes;
@@ -772,6 +889,7 @@ export function buildDocumentModel(graph, options = {}) {
       outgoingBySource,
       incomingByTarget,
       requestHintIndexes,
+      tileArrivalOutcomes,
     ));
 
   const moduleMap = new Map();
@@ -792,12 +910,15 @@ export function buildDocumentModel(graph, options = {}) {
     modules,
     useCases,
     pages,
-    truncated: truncatedUseCases || truncatedPages || nestedTruncation,
+    selectionTruncated: truncatedUseCases || truncatedPages,
+    detailsTruncated: nestedTruncation,
+    truncated: truncatedUseCases || truncatedPages,
     stats: {
       modules: modules.length,
       useCases: useCases.length,
       pages: pages.length,
-      routesTotal: routes.length,
+      routesTotal: allRoutes.length,
+      useCaseRoutesTotal: routes.length,
       pagesTotal: pageNodes.length,
     },
   };

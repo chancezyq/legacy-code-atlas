@@ -774,6 +774,75 @@ test("Windows understand migration preserves siblings in the retired Skill direc
   assert.equal(await pathExists(path.dirname(fixture.skillTarget)), true);
 });
 
+test("Windows fresh install preserves an unowned understand junction and installs atlas", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const outside = path.join(sandbox.root, "understand-anything-skill");
+  const legacySkillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const legacySkillTarget = path.join(outside, "SKILL.md");
+  const legacySkillContent = "# Understand Anything third-party Skill\n";
+  await mkdir(outside, { recursive: true });
+  await mkdir(path.dirname(legacySkillDir), { recursive: true });
+  await writeFile(legacySkillTarget, legacySkillContent, "utf8");
+  await windowsHarness.createDirectoryJunction({ target: outside, junction: legacySkillDir });
+
+  const result = await runInstaller({ installerPath, sandbox });
+
+  assert.match(result.stdout, /\/understand[\s\S]*(?:重解析点|reparse point)[\s\S]*不在[\s\S]*Atlas[\s\S]*管理范围[\s\S]*保留[\s\S]*跳过/iu);
+  assert.equal(await readFile(legacySkillTarget, "utf8"), legacySkillContent);
+  assert.equal(
+    (await snapshotTree(sandbox.root)).some((entry) => (
+      entry.path === "home/.agents/skills/understand"
+      && entry.type === "symbolic-link"
+    )),
+    true,
+  );
+  assert.equal(
+    await readPublishedSkill(path.join(sandbox.homeDir, ".agents", "skills", "atlas", "SKILL.md")),
+    await readFile(sourceSkillPath, "utf8"),
+  );
+  assert.equal((await readJson(path.join(
+    sandbox.homeDir,
+    ".legacy-code-atlas",
+    ".legacy-code-atlas-owner.json",
+  ))).version, 3);
+  await assertNoTransactionArtifacts(sandbox);
+});
+
+test("Windows v3 update preserves an unowned understand junction", { skip: windowsOnly }, async (t) => {
+  const sandbox = await createWindowsInstallerSandbox(t);
+  const fixture = await createV3Install(sandbox, {
+    skillContent: "# Previous Atlas Skill\n",
+    runtimeContent: "previous Atlas runtime\n",
+  });
+  const outside = path.join(sandbox.root, "understand-anything-update-skill");
+  const legacySkillDir = path.join(sandbox.homeDir, ".agents", "skills", "understand");
+  const legacySkillTarget = path.join(outside, "SKILL.md");
+  const legacySkillContent = "# Understand Anything remains installed\n";
+  await mkdir(outside, { recursive: true });
+  await writeFile(legacySkillTarget, legacySkillContent, "utf8");
+  await windowsHarness.createDirectoryJunction({ target: outside, junction: legacySkillDir });
+
+  const result = await runInstaller({ installerPath, sandbox });
+
+  assert.match(result.stdout, /\/understand[\s\S]*(?:重解析点|reparse point)[\s\S]*保留[\s\S]*跳过/iu);
+  assert.equal(await readFile(legacySkillTarget, "utf8"), legacySkillContent);
+  assert.equal(
+    (await snapshotTree(sandbox.root)).some((entry) => (
+      entry.path === "home/.agents/skills/understand"
+      && entry.type === "symbolic-link"
+    )),
+    true,
+  );
+  assert.equal(await readPublishedSkill(fixture.skillTarget), await readFile(sourceSkillPath, "utf8"));
+  assert.equal(
+    await readFile(path.join(fixture.installDir, "bin", "legacy-code-atlas.mjs"), "utf8"),
+    await readFile(sourceCliPath, "utf8"),
+  );
+  assert.equal(await pathExists(path.join(fixture.installDir, "runtime-sentinel.txt")), false);
+  assert.equal((await readJson(fixture.ownerMarker)).version, 3);
+  await assertNoTransactionArtifacts(sandbox);
+});
+
 test("Windows understand migration rejects a junction without following it", { skip: windowsOnly }, async (t) => {
   const sandbox = await createWindowsInstallerSandbox(t);
   const fixture = await createV3Install(sandbox, {

@@ -291,6 +291,45 @@ test("preflight blocks an orphaned pre-rename Atlas Skill without claiming unrel
   assert.doesNotMatch(collisionGuard, /Remove-Item/);
 });
 
+test("preflight preserves an unowned understand junction without weakening owned path guards", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const collisionGuard = topLevelFunction(installer, "Assert-NoUnownedLegacyIntegrationFiles");
+  const transactionGuard = topLevelFunction(installer, "Assert-TransactionPathsSafe");
+
+  assert.match(
+    collisionGuard,
+    /Get-PathEntryWithoutFollowingTarget\s+\$LegacySkillDir/,
+  );
+  assert.match(
+    collisionGuard,
+    /\$legacySkillDirectoryEntry[\s\S]*?Attributes[\s\S]*?\[IO[.]FileAttributes\]::ReparsePoint/,
+  );
+  assert.match(
+    collisionGuard,
+    /不属于[^\r\n]*Atlas[^\r\n]*ownership manifest[^\r\n]*\/understand[^\r\n]*(?:重解析点|reparse point)[^\r\n]*不在[^\r\n]*Atlas[^\r\n]*管理范围[^\r\n]*保留[^\r\n]*跳过/iu,
+  );
+  assert.doesNotMatch(collisionGuard, /按第三方|视为第三方/iu);
+  assert.doesNotMatch(collisionGuard, /Remove-Item/);
+  assert.match(
+    transactionGuard,
+    /if\s*\(\$Transaction[.]LegacySkillSha256[.]Length\s*-gt\s*0\)[\s\S]*?Assert-NoReparsePointInPath[^\r\n]*\$Transaction[.]LegacySkillTarget/,
+  );
+});
+
+test("transaction snapshot checks an owned legacy Skill directory before its child", async () => {
+  const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
+  const newTransaction = topLevelFunction(installer, "New-InstallTransaction");
+
+  assert.match(
+    newTransaction,
+    /if\s*\(\$legacySkillSha256[.]Length\s+-gt\s+0\)\s*\{[\s\S]*?Assert-NoReparsePointInPath[^\n]*\$paths[.]LegacySkillTarget/,
+  );
+  assert.ok(
+    newTransaction.indexOf("Assert-NoReparsePointInPath -Boundary $homeFull -Path $paths.LegacySkillTarget")
+      < newTransaction.indexOf("Get-PathEntryWithoutFollowingTarget $paths.LegacySkillTarget"),
+  );
+});
+
 test("Windows installer validates v1/v2 manifests and writes a one-file v3 manifest", async () => {
   const installer = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
   const initialize = topLevelFunction(installer, "Initialize-InstallTransactionManifest");

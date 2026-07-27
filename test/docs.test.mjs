@@ -52,13 +52,27 @@ test("document model derives modules, use cases, and page specs from the graph",
     audit.request.parameters.includes("orderId") && audit.request.parameters.includes("method"),
     "request parameters must list submitted form parameters",
   );
-  assert.ok(
-    audit.outcomes.some((outcome) => outcome.reason.includes("success") && outcome.target.endsWith("auditSuccess.jsp")),
-    "Struts success forward must become an outcome",
+  const successOutcome = audit.outcomes.find(
+    (outcome) => outcome.reason.includes("success") && outcome.target.endsWith("auditSuccess.jsp"),
   );
-  assert.ok(
-    audit.outcomes.some((outcome) => outcome.reason.includes("error") && outcome.target.endsWith("audit.jsp")),
-    "Struts error forward must become an alternate outcome",
+  const errorOutcome = audit.outcomes.find(
+    (outcome) => outcome.reason.includes("error") && outcome.target.endsWith("audit.jsp"),
+  );
+  assert.equal(successOutcome?.classification, "code-confirmed");
+  assert.equal(successOutcome?.resultName, "success");
+  assert.equal(successOutcome?.configEvidence?.line, 9);
+  assert.equal(successOutcome?.codeEvidence?.[0]?.line, 17);
+  assert.equal(errorOutcome?.classification, "configured-candidate");
+  assert.equal(errorOutcome?.resultName, "error");
+  assert.deepEqual(errorOutcome?.codeEvidence, []);
+  const renderedUseCases = renderUseCases(model);
+  assert.match(
+    renderedUseCases,
+    /\[code-returned possibility\][^\n]*Struts forward success[^\n]*configuration WEB-INF\/struts-config[.]xml:9[^\n]*code src\/com\/acme\/order\/web\/OrderAuditAction[.]java:17/u,
+  );
+  assert.match(
+    renderedUseCases,
+    /\[configured candidate; not code-confirmed by this index\][^\n]*Struts forward error[^\n]*configuration WEB-INF\/struts-config[.]xml:10/u,
   );
   assert.deepEqual(audit.inputs, ["orderId", "method", "decision"], "inputs must come from the trigger form evidence");
   assert.ok(
@@ -78,6 +92,12 @@ test("document model derives modules, use cases, and page specs from the graph",
     "audit use case must classify table access from reads_from/writes_to edges",
   );
   assert.equal(typeof audit.minConfidence, "number");
+
+  const renderedUi = renderUiSpec(model);
+  assert.match(
+    renderedUi,
+    /configured candidate; not code-confirmed by this index[^\n]*forward from route \/order\/audit[.]do/u,
+  );
 
   const auditPage = model.pages.find((page) => page.filePath === "web/order/audit.jsp");
   assert.ok(auditPage, "audit.jsp must become a page spec");
@@ -102,6 +122,240 @@ test("document model derives modules, use cases, and page specs from the graph",
 
   assert.ok(model.stats.useCases >= 10);
   assert.equal(model.stats.pages, 4);
+});
+
+test("document model keeps client navigation out of business use cases", () => {
+  const ev = [{ file: "web/menu.jsp", line: 1, column: 1, snippet: "menu" }];
+  const page = {
+    id: "page:web/menu.jsp", type: "page", name: "menu.jsp", filePath: "web/menu.jsp",
+    evidence: ev, data: { fields: [], visibleText: "Menu" }, searchText: [],
+  };
+  const route = (name) => ({
+    id: `route:${name}`, type: "route", name, evidence: ev, data: {}, searchText: [],
+  });
+  const routes = [
+    route("/assets/guide.pdf"),
+    route("/admin/view.jsp"),
+    route("/"),
+    route("/order/save.do"),
+    route("/security/login"),
+    route("/api/status"),
+  ];
+  const edge = (id, source, target, type) => ({
+    id, source, target, type, confidence: 1, reason: type, evidence: ev, data: {},
+  });
+  const graph = {
+    nodes: [
+      page,
+      ...routes,
+      { id: "file:WEB-INF/struts.xml", type: "file", name: "struts.xml", evidence: ev, data: {}, searchText: [] },
+      { id: "java_method:save", type: "java_method", name: "OrderAction.save", evidence: ev, data: {}, searchText: [] },
+    ],
+    edges: [
+      edge("pdf", page.id, "route:/assets/guide.pdf", "links_to"),
+      edge("jsp", page.id, "route:/admin/view.jsp", "links_to"),
+      edge("root", page.id, "route:/", "links_to"),
+      edge("configured", "file:WEB-INF/struts.xml", "route:/order/save.do", "contains"),
+      edge("backend", "route:/order/save.do", "java_method:save", "dispatches_to"),
+      edge("form", page.id, "route:/security/login", "submits_to"),
+      edge("request", page.id, "route:/api/status", "requests"),
+    ],
+  };
+
+  const model = buildDocumentModel(graph);
+  assert.deepEqual(
+    model.useCases.map(({ route: name }) => name),
+    ["/api/status", "/order/save.do", "/security/login"],
+  );
+  assert.deepEqual(
+    model.pages[0].actions.map(({ target }) => target),
+    ["/", "/admin/view.jsp", "/api/status", "/assets/guide.pdf", "/security/login"],
+  );
+  const diagrams = renderDiagrams(model);
+  assert.match(diagrams, /assets\/guide[.]pdf/u, "client navigation remains visible in navigation diagrams");
+  assert.match(diagrams, /admin\/view[.]jsp/u);
+});
+
+test("use case documents preserve distinct source-proven data flow branches", () => {
+  const ev = (file, line) => [{ file, line, column: 1, snippet: file }];
+  const node = (id, type, name, file = "src/OrderAction.java") => ({
+    id, type, name, filePath: file, evidence: ev(file, 1), data: {}, searchText: [],
+  });
+  const route = node("route:/order/save.do", "route", "/order/save.do", "WEB-INF/struts.xml");
+  const action = node("java_method:action", "java_method", "OrderAction.save");
+  const audit = node("java_method:audit", "java_method", "OrderDao.writeAudit");
+  const order = node("java_method:order", "java_method", "OrderDao.updateOrder");
+  const auditStatement = node("statement:audit.insert", "statement", "audit.insert", "sqlmap/audit.xml");
+  auditStatement.data.type = "insert";
+  const orderStatement = node("statement:order.update", "statement", "order.update", "sqlmap/order.xml");
+  orderStatement.data.type = "update";
+  const auditTable = node("table:dbo.audit", "table", "dbo.audit", "sqlmap/audit.xml");
+  const orderTable = node("table:dbo.orders", "table", "dbo.orders", "sqlmap/order.xml");
+  const edge = (id, source, target, type, file, line, confidence = 1) => ({
+    id, source, target, type, confidence, reason: type, evidence: ev(file, line), data: {},
+  });
+  const graph = {
+    nodes: [route, action, audit, order, auditStatement, orderStatement, auditTable, orderTable],
+    edges: [
+      edge("dispatch", route.id, action.id, "dispatches_to", "WEB-INF/struts.xml", 10),
+      edge("audit-call", action.id, audit.id, "calls", "src/OrderAction.java", 20),
+      edge("order-call", action.id, order.id, "calls", "src/OrderAction.java", 21, 0.4),
+      edge("audit-sql", audit.id, auditStatement.id, "uses_statement", "src/OrderDao.java", 30),
+      edge("order-sql", order.id, orderStatement.id, "uses_statement", "src/OrderDao.java", 31),
+      edge("audit-table", auditStatement.id, auditTable.id, "writes_to", "sqlmap/audit.xml", 40),
+      edge("order-table", orderStatement.id, orderTable.id, "writes_to", "sqlmap/order.xml", 41),
+    ],
+  };
+
+  const model = buildDocumentModel(graph);
+  assert.equal(model.useCases[0].alternateFlows.length, 1);
+  assert.equal(model.useCases[0].minConfidence, 1, "alternate branches do not change main-flow confidence");
+  assert.deepEqual(model.useCases[0].alternateFlowConfidences, [0.4]);
+  assert.deepEqual(
+    model.useCases[0].alternateFlows[0].map(({ name }) => name),
+    ["/order/save.do", "OrderAction.save", "OrderDao.updateOrder", "order.update", "dbo.orders"],
+  );
+  const markdown = renderUseCases(model);
+  assert.match(markdown, /Main-flow confidence 1[.]00/u);
+  assert.match(markdown, /Additional data flow branches:/u);
+  assert.match(markdown, /Branch 1: confidence 0[.]40 \(contains heuristic relationships; review manually\)/u);
+  assert.match(markdown, /OrderDao[.]updateOrder[\s\S]*order[.]update[\s\S]*dbo[.]orders/u);
+  assert.match(markdown, /src\/OrderDao[.]java:31/u);
+
+  const diagrams = renderDiagrams(model);
+  const moduleBlock = diagrams.match(/## Module overview: order[\s\S]*?```mermaid\n([\s\S]*?)```/u)?.[1] ?? "";
+  const routeId = moduleBlock.match(/^  (n\d+)\(\[\/order\/save[.]do\]\)$/mu)?.[1];
+  const actionId = moduleBlock.match(/^  (n\d+)\[\[OrderAction[.]save\]\]$/mu)?.[1];
+  const orderDaoId = moduleBlock.match(/^  (n\d+)\[\[OrderDao[.]updateOrder\]\]$/mu)?.[1];
+  const orderStatementId = moduleBlock.match(/^  (n\d+)\{\{order[.]update\}\}$/mu)?.[1];
+  const orderTableId = moduleBlock.match(/^  (n\d+)\[\(dbo[.]orders\)\]$/mu)?.[1];
+  assert.ok(routeId && actionId && orderDaoId && orderStatementId && orderTableId);
+  assert.match(moduleBlock, new RegExp(`^  ${actionId} -[.]->\\|calls\\| ${orderDaoId}$`, "mu"));
+  assert.match(moduleBlock, new RegExp(`^  ${orderDaoId} -->\\|uses_statement\\| ${orderStatementId}$`, "mu"));
+  assert.match(moduleBlock, new RegExp(`^  ${orderStatementId} -->\\|writes_to\\| ${orderTableId}$`, "mu"));
+  assert.doesNotMatch(moduleBlock, new RegExp(`^  ${routeId} -->\\|write\\| ${orderTableId}$`, "mu"));
+  assert.match(diagrams, /dashed edges are heuristic relationships/u);
+});
+
+test("alternate flows retain distinct Java branches that converge on shared data", () => {
+  const evidence = [{ file: "src/SharedAction.java", line: 1, column: 1, snippet: "flow" }];
+  const node = (id, type, name) => ({ id, type, name, evidence, data: {}, searchText: [] });
+  const route = node("route:/shared/save.do", "route", "/shared/save.do");
+  const action = node("java_method:action", "java_method", "SharedAction.save");
+  const first = node("java_method:first", "java_method", "SharedDao.first");
+  const second = node("java_method:second", "java_method", "SharedDao.second");
+  const statement = node("statement:shared.save", "statement", "shared.save");
+  statement.data.type = "update";
+  const table = node("table:dbo.shared", "table", "dbo.shared");
+  const relation = (id, source, target, type) => ({
+    id, source, target, type, confidence: 1, reason: type, evidence, data: {},
+  });
+  const graph = {
+    nodes: [route, action, first, second, statement, table],
+    edges: [
+      relation("dispatch", route.id, action.id, "dispatches_to"),
+      relation("first-call", action.id, first.id, "calls"),
+      relation("second-call", action.id, second.id, "calls"),
+      relation("first-sql", first.id, statement.id, "uses_statement"),
+      relation("second-sql", second.id, statement.id, "uses_statement"),
+      relation("table", statement.id, table.id, "writes_to"),
+    ],
+  };
+
+  const useCase = buildDocumentModel(graph).useCases[0];
+  assert.equal(useCase.alternateFlows.length, 1);
+  assert.deepEqual(
+    [useCase.mainFlow, ...useCase.alternateFlows]
+      .map((flow) => flow.find((step) => step.name.startsWith("SharedDao."))?.name)
+      .sort(),
+    ["SharedDao.first", "SharedDao.second"],
+  );
+  assert.equal(useCase.flowTruncated, false);
+});
+
+test("UCS main and alternate flow steps render configured and code-returned outcome modality", () => {
+  const configEvidence = (line) => [{ file: "WEB-INF/struts.xml", line, column: 1, snippet: "result" }];
+  const codeEvidence = [{ file: "src/OrderAction.java", line: 21, column: 3, snippet: 'return "confirmed";' }];
+  const node = (id, type, name, filePath) => ({
+    id,
+    type,
+    name,
+    ...(filePath ? { filePath } : {}),
+    evidence: configEvidence(1),
+    data: type === "statement" ? { type: "select" } : {},
+    searchText: [],
+  });
+  const route = node("route:/order/view.do", "route", "/order/view.do");
+  const candidatePage = node("page:web/a-candidate.jsp", "page", "candidate.jsp", "web/a-candidate.jsp");
+  const confirmedPage = node("page:web/b-confirmed.jsp", "page", "confirmed.jsp", "web/b-confirmed.jsp");
+  const candidateStatement = node("statement:a.candidate", "statement", "a.candidate");
+  const confirmedStatement = node("statement:b.confirmed", "statement", "b.confirmed");
+  const candidateTable = node("table:a_candidate", "table", "a_candidate");
+  const confirmedTable = node("table:b_confirmed", "table", "b_confirmed");
+  const edge = (id, source, target, type, evidence, data = {}) => ({
+    id,
+    source,
+    target,
+    type,
+    confidence: 1,
+    reason: type,
+    evidence,
+    data,
+  });
+  const graph = {
+    nodes: [
+      route,
+      candidatePage,
+      confirmedPage,
+      candidateStatement,
+      confirmedStatement,
+      candidateTable,
+      confirmedTable,
+    ],
+    edges: [
+      edge("candidate-result", route.id, candidatePage.id, "forwards_to", configEvidence(10), {
+        outcome: {
+          framework: "struts2",
+          name: "candidate",
+          classification: "configured-candidate",
+          codeEvidence: [],
+        },
+      }),
+      edge("candidate-statement", candidatePage.id, candidateStatement.id, "uses_statement", configEvidence(11)),
+      edge("candidate-table", candidateStatement.id, candidateTable.id, "reads_from", configEvidence(12)),
+      edge("confirmed-result", route.id, confirmedPage.id, "forwards_to", configEvidence(20), {
+        outcome: {
+          framework: "struts2",
+          name: "confirmed",
+          classification: "code-confirmed",
+          codeEvidence,
+        },
+      }),
+      edge("confirmed-statement", confirmedPage.id, confirmedStatement.id, "uses_statement", configEvidence(22)),
+      edge("confirmed-table", confirmedStatement.id, confirmedTable.id, "reads_from", configEvidence(23)),
+    ],
+  };
+
+  const model = buildDocumentModel(graph);
+  assert.equal(model.useCases[0].mainFlow[1].classification, "configured-candidate");
+  assert.equal(model.useCases[0].alternateFlows[0][1].classification, "code-confirmed");
+
+  const markdown = renderUseCases(model);
+  assert.match(
+    markdown,
+    /2[.] page candidate[.]jsp[^\n]*\[configured candidate; not code-confirmed by this index\]/u,
+  );
+  assert.match(markdown, /2[.] page confirmed[.]jsp[^\n]*\[code-returned possibility\]/u);
+  const diagrams = renderDiagrams({
+    ...model,
+    useCases: [{ ...model.useCases[0], mainFlow: model.useCases[0].alternateFlows[0] }],
+    modules: [{
+      ...model.modules[0],
+      useCases: [{ ...model.useCases[0], mainFlow: model.useCases[0].alternateFlows[0] }],
+    }],
+  });
+  const sequence = diagrams.match(/## Use case sequence: \/order\/view[.]do[\s\S]*?```mermaid\n([\s\S]*?)```/u)?.[1] ?? "";
+  assert.match(sequence, /P0->>P1: forwards_to \(code-returned possibility\)/u);
 });
 
 test("document model and renderers are deterministic and ignore node order", async () => {
@@ -213,7 +467,11 @@ test("hostile node names cannot escape Mermaid labels or Markdown structure", ()
 });
 
 test("renderers cap output size with an explicit truncation notice", () => {
-  const nodes = [];
+  const backend = {
+    id: "java_method:Shared.execute", type: "java_method", name: "Shared.execute",
+    evidence: [], data: {}, searchText: [],
+  };
+  const nodes = [backend];
   const edges = [];
   const routeCount = 1200;
   for (let index = 0; index < routeCount; index += 1) {
@@ -225,15 +483,25 @@ test("renderers cap output size with an explicit truncation notice", () => {
       data: {},
       searchText: [],
     });
+    edges.push({
+      id: `dispatch:${index}`,
+      source: `route:/m${index % 5}/u${index}.do`,
+      target: backend.id,
+      type: "dispatches_to",
+      confidence: 1,
+      reason: "configured route",
+      evidence: [{ file: "routes.xml", line: index + 1, column: 1, snippet: "route" }],
+      data: {},
+    });
   }
   const graph = {
     schemaVersion: "1.0.0",
     project: { root: "X" },
     summary: {
       nodes: nodes.length,
-      edges: 0,
-      nodeTypes: { route: routeCount },
-      edgeTypes: {},
+      edges: edges.length,
+      nodeTypes: { route: routeCount, java_method: 1 },
+      edgeTypes: { dispatches_to: edges.length },
     },
     warnings: [],
     nodes,
@@ -336,6 +604,50 @@ test("route-only module diagrams retain their standalone route node", () => {
   assert.doesNotMatch(moduleBlock, /^  n\d+ (?:-->|-.->)/mu);
 });
 
+test("module overview diagrams report truncated alternate flows", () => {
+  const route = "/orders/branch.do";
+  const routeStep = {
+    nodeId: `route:${route}`,
+    nodeType: "route",
+    name: route,
+    via: null,
+    confidence: 1,
+  };
+  const useCase = {
+    route,
+    routeId: `route:${route}`,
+    triggers: [],
+    outcomes: [],
+    mainFlow: [routeStep, {
+      nodeId: "java_method:Branch.main/0",
+      nodeType: "java_method",
+      name: "Branch.main",
+      via: "dispatches_to",
+      confidence: 1,
+    }],
+    alternateFlows: Array.from({ length: 8 }, (_, index) => [routeStep, {
+      nodeId: `java_method:Branch.alternate${index}/0`,
+      nodeType: "java_method",
+      name: `Branch.alternate${index}`,
+      via: "dispatches_to",
+      confidence: 1,
+    }]),
+    alternateFlowsTruncated: true,
+    tables: [],
+  };
+  const markdown = renderDiagrams({
+    scope: null,
+    truncated: false,
+    modules: [{ name: "orders", useCases: [useCase] }],
+    useCases: [useCase],
+  });
+
+  assert.match(
+    markdown,
+    /## Module overview: orders[\s\S]*?```mermaid[\s\S]*?```\n\n> Note: [^\n]*truncated/u,
+  );
+});
+
 test("diagram byte truncation closes the active Mermaid fence before its warning", () => {
   const modules = Array.from({ length: 30 }, (_, moduleIndex) => {
     const route = `/large/${moduleIndex}.do`;
@@ -430,7 +742,8 @@ test("module overview preserves aggregate read-write access when the main flow s
 
   assert.ok(routeId && statementId && tableId);
   assert.match(moduleBlock, new RegExp(`^  ${statementId} -->\\|reads_from\\| ${tableId}$`, "mu"));
-  assert.match(moduleBlock, new RegExp(`^  ${routeId} -->\\|read-write\\| ${tableId}$`, "mu"));
+  assert.match(moduleBlock, new RegExp(`^  ${routeId} -[.]->\\|aggregated read-write\\| ${tableId}$`, "mu"));
+  assert.match(markdown, /dashed shortcut edges summarize table access omitted from displayed flows/u);
 });
 
 test("module overview diagrams preserve confidence on main-flow edges", () => {
@@ -473,7 +786,7 @@ test("module overview diagrams preserve confidence on main-flow edges", () => {
   assert.match(sequenceBlock, /P0-->>P1: maps_to \(heuristic\)/);
 });
 
-test("screen navigation preserves trigger and outcome confidence", () => {
+test("screen navigation renders unclassified legacy outcomes as configured candidates", () => {
   const evidence = [{ file: "routes.xml", line: 1, column: 1, snippet: "route" }];
   const page = {
     id: "page:web/start.jsp",
@@ -496,15 +809,99 @@ test("screen navigation preserves trigger and outcome confidence", () => {
   };
   const edges = [
     { id: "trigger", source: page.id, target: route.id, type: "submits_to", confidence: 0.8, reason: "inferred form", evidence, data: {} },
-    { id: "outcome", source: route.id, target: result.id, type: "forwards_to", confidence: 0.7, reason: "inferred forward", evidence, data: {} },
+    { id: "outcome", source: route.id, target: result.id, type: "forwards_to", confidence: 1, reason: "inferred forward", evidence, data: {} },
   ];
 
   const markdown = renderDiagrams(buildDocumentModel({ nodes: [page, route, result], edges }));
   const navigation = markdown.match(/## Screen navigation[\s\S]*?```mermaid\n([\s\S]*?)```/)?.[1] ?? "";
 
   assert.match(navigation, /-.->\|submits_to\|/);
-  assert.match(navigation, /-.->\|inferred forward\|/);
-  assert.match(markdown, /dashed edges are heuristic relationships/);
+  assert.match(navigation, /-.->\|inferred forward \[configured candidate\]\|/);
+  assert.match(markdown, /dashed edges include configured-only outcome candidates/);
+});
+
+test("missing or invalid code-confirmed outcome metadata degrades to a configured candidate", () => {
+  const evidence = [{ file: "routes.xml", line: 1, column: 1, snippet: "route" }];
+  const codeEvidence = [{ file: "src/SaveAction.java", line: 9, column: 3, snippet: 'return "success";' }];
+  const route = { id: "route:/save.do", type: "route", name: "/save.do", evidence, data: {}, searchText: [] };
+  const page = {
+    id: "page:web/saved.jsp",
+    type: "page",
+    name: "saved.jsp",
+    filePath: "web/saved.jsp",
+    evidence,
+    data: { fields: [], visibleText: "" },
+    searchText: [],
+  };
+  const outcomeEdge = (outcome) => ({
+    id: "outcome",
+    source: route.id,
+    target: page.id,
+    type: "forwards_to",
+    confidence: 1,
+    reason: "success",
+    evidence,
+    data: { outcome },
+  });
+  const invalidMetadata = [
+    { name: "missing framework", value: { name: "success", classification: "code-confirmed", codeEvidence } },
+    { name: "unsupported framework", value: { framework: "spring", name: "success", classification: "code-confirmed", codeEvidence } },
+    { name: "missing name", value: { framework: "struts1", classification: "code-confirmed", codeEvidence } },
+    { name: "empty name", value: { framework: "struts1", name: " ", classification: "code-confirmed", codeEvidence } },
+    { name: "non-string name", value: { framework: "struts1", name: 42, classification: "code-confirmed", codeEvidence } },
+    { name: "invalid classification", value: { framework: "struts1", name: "success", classification: "confirmed", codeEvidence } },
+    { name: "non-array evidence", value: { framework: "struts1", name: "success", classification: "code-confirmed", codeEvidence: "src/SaveAction.java:9" } },
+    { name: "empty evidence file", value: { framework: "struts1", name: "success", classification: "code-confirmed", codeEvidence: [{ file: "", line: 9 }] } },
+    { name: "non-positive evidence line", value: { framework: "struts1", name: "success", classification: "code-confirmed", codeEvidence: [{ file: "src/SaveAction.java", line: 0 }] } },
+  ];
+
+  for (const invalid of invalidMetadata) {
+    const model = buildDocumentModel({ nodes: [route, page], edges: [outcomeEdge(invalid.value)] });
+    assert.equal(
+      model.useCases[0].outcomes[0].classification,
+      "configured-candidate",
+      invalid.name,
+    );
+    assert.deepEqual(model.useCases[0].outcomes[0].codeEvidence, [], invalid.name);
+    assert.match(renderDiagrams(model), /-.->\|success \[configured candidate\]\|/u, invalid.name);
+  }
+
+  const valid = buildDocumentModel({
+    nodes: [route, page],
+    edges: [outcomeEdge({
+      framework: "struts1",
+      name: "success",
+      classification: "code-confirmed",
+      codeEvidence,
+    })],
+  });
+  assert.equal(valid.useCases[0].outcomes[0].classification, "code-confirmed");
+  assert.deepEqual(valid.useCases[0].outcomes[0].codeEvidence, [{ file: "src/SaveAction.java", line: 9 }]);
+});
+
+test("non-outcome edges ignore stray outcome metadata", () => {
+  const evidence = [{ file: "src/SaveAction.java", line: 1, column: 1, snippet: "save" }];
+  const route = { id: "route:/save.do", type: "route", name: "/save.do", evidence, data: {}, searchText: [] };
+  const method = { id: "java_method:save", type: "java_method", name: "SaveAction.save", evidence, data: {}, searchText: [] };
+  const edge = {
+    id: "call",
+    source: route.id,
+    target: method.id,
+    type: "calls",
+    confidence: 1,
+    reason: "call",
+    evidence,
+    data: {
+      outcome: {
+        classification: "code-confirmed",
+        codeEvidence: evidence,
+      },
+    },
+  };
+
+  const model = buildDocumentModel({ nodes: [route, method], edges: [edge] });
+  assert.equal(model.useCases[0].mainFlow[1].classification, undefined);
+  assert.match(renderDiagrams(model), /-->\|calls\|/u);
 });
 
 test("empty document models render explicit empty states", () => {
@@ -1337,7 +1734,17 @@ test("use-case request summaries preserve partially unknown HTTP methods", () =>
     searchText: [],
   };
 
-  const model = buildDocumentModel({ nodes: [route], edges: [] });
+  const source = {
+    id: "file:web/app.js", type: "file", name: "app.js", filePath: "web/app.js",
+    evidence: [evidence], data: {}, searchText: [],
+  };
+  const model = buildDocumentModel({
+    nodes: [source, route],
+    edges: [{
+      id: "request", source: source.id, target: route.id, type: "requests",
+      confidence: 1, reason: "fetch request", evidence: [evidence], data: {},
+    }],
+  });
 
   assert.deepEqual(model.useCases[0].request, {
     methods: ["GET"],
@@ -1457,6 +1864,62 @@ test("one evidence-scoped form does not absorb unrelated page fields", () => {
   const model = buildDocumentModel({ nodes: [page, route], edges: [submission] });
 
   assert.deepEqual(model.useCases[0].inputs, ["inside"]);
+});
+
+test("dynamic parameter-name hints stay scoped and render their uncertainty", () => {
+  const dynamicEvidence = { file: "web/edit.jsp", line: 1, column: 7, snippet: '<form action="/dynamic.do">' };
+  const knownEvidence = { file: "web/edit.jsp", line: 2, column: 7, snippet: '<form action="/known.do">' };
+  const page = {
+    id: "page:web/edit.jsp",
+    type: "page",
+    name: "edit.jsp",
+    filePath: "web/edit.jsp",
+    evidence: [dynamicEvidence, knownEvidence],
+    data: { fields: ["known"], visibleText: "" },
+    searchText: [],
+  };
+  const route = (name, evidence, hint) => ({
+    id: `route:${name}`,
+    type: "route",
+    name,
+    evidence: [evidence],
+    data: { requestHints: [{ method: "POST", evidence, ...hint }] },
+    searchText: [],
+  });
+  const dynamicRoute = route("/dynamic.do", dynamicEvidence, {
+    parameters: {},
+    parametersComplete: false,
+    hasDynamicParameterNames: true,
+  });
+  const knownRoute = route("/known.do", knownEvidence, {
+    parameters: { known: "" },
+    parametersComplete: true,
+  });
+  const submission = (target, evidence) => ({
+    id: `submit:${target.id}`,
+    source: page.id,
+    target: target.id,
+    type: "submits_to",
+    confidence: 1,
+    reason: "form request",
+    evidence: [evidence],
+    data: {},
+  });
+
+  const model = buildDocumentModel({
+    nodes: [page, dynamicRoute, knownRoute],
+    edges: [submission(dynamicRoute, dynamicEvidence), submission(knownRoute, knownEvidence)],
+  });
+  const dynamicUseCase = model.useCases.find(({ route: name }) => name === "/dynamic.do");
+  const knownUseCase = model.useCases.find(({ route: name }) => name === "/known.do");
+
+  assert.equal(dynamicUseCase.request.hasDynamicParameterNames, true);
+  assert.deepEqual(dynamicUseCase.inputs, []);
+  assert.deepEqual(knownUseCase.inputs, ["known"]);
+  assert.match(
+    renderUseCases(model),
+    /Use case: \/dynamic[.]do[\s\S]*Request: POST, additional parameter names resolved at runtime/u,
+  );
 });
 
 test("explicit incomplete hints do not guess fields from an unrelated trigger page", () => {
@@ -1685,7 +2148,8 @@ test("deep flows report truncation while feature scope reaches every reverse flo
 
   const unscoped = buildDocumentModel(graph);
   assert.equal(unscoped.useCases[0].flowTruncated, true);
-  assert.equal(unscoped.truncated, true);
+  assert.equal(unscoped.detailsTruncated, true);
+  assert.equal(unscoped.truncated, false);
   assert.match(renderUseCases(unscoped), /main flow exceeds the display limit and was truncated/);
 
   const scoped = buildDocumentModel(graph, { scopeQuery: "deep_target_table" });
@@ -1800,10 +2264,130 @@ test("scoped UI pages include pages reached through Tiles composition", () => {
   assert.equal(model.scope.kind, "module");
   assert.deepEqual(model.pages.map(({ filePath }) => filePath), ["web/orders/view.jsp"]);
   assert.deepEqual(model.pages[0].arrivals.map(({ kind, fromType }) => [kind, fromType]), [["puts", "tiles_definition"]]);
+  assert.equal(model.pages[0].arrivals[0].classification, "configured-candidate");
+  assert.deepEqual(model.pages[0].arrivals[0].codeEvidence, []);
   assert.deepEqual(model.useCases[0].outcomes.map(({ kind, targetPath }) => [kind, targetPath]), [
     ["composes", "web/orders/view.jsp"],
   ]);
+  assert.match(
+    renderUiSpec(model),
+    /\[configured candidate; not code-confirmed by this index\] Tiles put from tiles_definition orders[.]view/u,
+  );
   assert.match(renderDiagrams(model), /uses_tile.*puts|Tiles composition/u);
+});
+
+test("Tiles UI arrivals preserve code evidence from one uniquely owning route outcome", () => {
+  const routeEvidence = [{ file: "struts.xml", line: 8, column: 1, snippet: "result" }];
+  const tileEvidence = [{ file: "tiles.xml", line: 3, column: 1, snippet: "put" }];
+  const codeEvidence = [{ file: "src/ViewAction.java", line: 19, column: 3, snippet: 'return "view";' }];
+  const route = { id: "route:/view.action", type: "route", name: "/view.action", evidence: routeEvidence, data: {}, searchText: [] };
+  const tile = { id: "tiles_definition:view", type: "tiles_definition", name: "view", evidence: tileEvidence, data: {}, searchText: [] };
+  const page = {
+    id: "page:web/view.jsp",
+    type: "page",
+    name: "view.jsp",
+    filePath: "web/view.jsp",
+    evidence: tileEvidence,
+    data: { fields: [], visibleText: "View" },
+    searchText: [],
+  };
+  const usesTile = {
+    id: "uses-tile",
+    source: route.id,
+    target: tile.id,
+    type: "uses_tile",
+    confidence: 1,
+    reason: "view",
+    evidence: routeEvidence,
+    data: {
+      outcome: {
+        framework: "struts2",
+        name: "view",
+        classification: "code-confirmed",
+        codeEvidence,
+      },
+    },
+  };
+  const put = {
+    id: "put-body",
+    source: tile.id,
+    target: page.id,
+    type: "puts",
+    confidence: 1,
+    reason: "Tiles put body",
+    evidence: tileEvidence,
+    data: { name: "body" },
+  };
+
+  const model = buildDocumentModel({ nodes: [route, tile, page], edges: [usesTile, put] });
+  const arrival = model.pages[0].arrivals[0];
+
+  assert.equal(arrival.classification, "code-confirmed");
+  assert.equal(arrival.resultName, "view");
+  assert.deepEqual(arrival.configEvidence, { file: "struts.xml", line: 8 });
+  assert.deepEqual(arrival.codeEvidence, [{ file: "src/ViewAction.java", line: 19 }]);
+  assert.match(
+    renderUiSpec(model),
+    /\[code-returned possibility\] Tiles put from tiles_definition view; configuration struts[.]xml:8; code src\/ViewAction[.]java:19/u,
+  );
+});
+
+test("Tiles UI arrivals degrade multiple owning route outcomes to a candidate without code evidence", () => {
+  const routeEvidence = (file, line) => [{ file, line, column: 1, snippet: "result" }];
+  const tileEvidence = [{ file: "tiles.xml", line: 3, column: 1, snippet: "put" }];
+  const route = (name) => ({ id: `route:/${name}.action`, type: "route", name: `/${name}.action`, evidence: routeEvidence("struts.xml", 1), data: {}, searchText: [] });
+  const firstRoute = route("first");
+  const secondRoute = route("second");
+  const tile = { id: "tiles_definition:shared", type: "tiles_definition", name: "shared", evidence: tileEvidence, data: {}, searchText: [] };
+  const page = {
+    id: "page:web/shared.jsp",
+    type: "page",
+    name: "shared.jsp",
+    filePath: "web/shared.jsp",
+    evidence: tileEvidence,
+    data: { fields: [], visibleText: "Shared" },
+    searchText: [],
+  };
+  const usesTile = (id, source, line) => ({
+    id,
+    source,
+    target: tile.id,
+    type: "uses_tile",
+    confidence: 1,
+    reason: "shared",
+    evidence: routeEvidence("struts.xml", line),
+    data: {
+      outcome: {
+        framework: "struts2",
+        name: "shared",
+        classification: "code-confirmed",
+        codeEvidence: routeEvidence(`src/${id}.java`, line + 10),
+      },
+    },
+  });
+  const put = {
+    id: "put-body",
+    source: tile.id,
+    target: page.id,
+    type: "puts",
+    confidence: 1,
+    reason: "Tiles put body",
+    evidence: tileEvidence,
+    data: { name: "body" },
+  };
+  const graph = {
+    nodes: [firstRoute, secondRoute, tile, page],
+    edges: [usesTile("first", firstRoute.id, 5), usesTile("second", secondRoute.id, 6), put],
+  };
+
+  const model = buildDocumentModel(graph);
+  const arrival = model.pages[0].arrivals[0];
+
+  assert.equal(arrival.classification, "configured-candidate");
+  assert.deepEqual(arrival.codeEvidence, []);
+  const uiSpec = renderUiSpec(model);
+  assert.match(uiSpec, /\[configured candidate; not code-confirmed by this index\] Tiles put/u);
+  assert.doesNotMatch(uiSpec, /src\/(?:first|second)[.]java/u);
 });
 
 test("scoped UI pages follow JSP includes and cite fragment arrivals", () => {
@@ -1984,12 +2568,18 @@ test("per-section model caps are explicit in generated documents", () => {
   assert.equal(cappedPage.actionsTruncated, true);
   assert.equal(cappedPage.arrivals.length, 20);
   assert.equal(cappedPage.arrivalsTruncated, true);
-  assert.equal(model.truncated, true);
+  assert.equal(model.selectionTruncated, false);
+  assert.equal(model.detailsTruncated, true);
+  assert.equal(model.truncated, false);
   assert.match(renderUseCases(model), /additional triggers were truncated/);
   assert.match(renderUseCases(model), /additional tables were truncated/);
+  assert.doesNotMatch(renderUseCases(model), /only the leading entries are included/u);
   assert.match(renderUiSpec(model), /additional page actions were truncated/);
   assert.match(renderUiSpec(model), /additional arrival paths were truncated/);
-  assert.match(renderDiagrams(model), /number of entries exceeded the generation cap/);
+  assert.doesNotMatch(
+    renderDiagrams(model).split("\n## ", 1)[0],
+    /only the leading entries are included/u,
+  );
 });
 
 test("page fields leave mixed explicit and absent defaults unknown", () => {
@@ -2110,17 +2700,17 @@ test("screen navigation keeps same-named pages distinct by project-relative path
       .map(([, id, label]) => [label, id]),
   );
   const actualEdges = new Set(
-    [...navigation.matchAll(/^  (s\d+) -->\|([^|]+)\| (s\d+)$/gmu)]
-      .map(([, from, label, to]) => `${from}|${label}|${to}`),
+    [...navigation.matchAll(/^  (s\d+) (-->|-.->)\|([^|]+)\| (s\d+)$/gmu)]
+      .map(([, from, arrow, label, to]) => `${from}|${arrow}|${label}|${to}`),
   );
   assert.equal(pageIds.size, 4, "same basenames must produce four distinct page nodes");
   assert.deepEqual(
     actualEdges,
     new Set([
-      `${pageIds.get("a/list.jsp")}|submits_to|${routeIds.get("/a/go.do")}`,
-      `${routeIds.get("/a/go.do")}|success|${pageIds.get("a/result.jsp")}`,
-      `${pageIds.get("b/list.jsp")}|submits_to|${routeIds.get("/b/go.do")}`,
-      `${routeIds.get("/b/go.do")}|success|${pageIds.get("b/result.jsp")}`,
+      `${pageIds.get("a/list.jsp")}|-->|submits_to|${routeIds.get("/a/go.do")}`,
+      `${routeIds.get("/a/go.do")}|-.->|success [configured candidate]|${pageIds.get("a/result.jsp")}`,
+      `${pageIds.get("b/list.jsp")}|-->|submits_to|${routeIds.get("/b/go.do")}`,
+      `${routeIds.get("/b/go.do")}|-.->|success [configured candidate]|${pageIds.get("b/result.jsp")}`,
     ]),
   );
 });
@@ -2207,6 +2797,10 @@ test("screen navigation renders route redirects as route nodes", () => {
     reason: "success",
     confidence: 1,
     evidence: { file: "struts.xml", line: 1 },
+    resultName: "",
+    classification: "configured-candidate",
+    configEvidence: { file: "struts.xml", line: 1 },
+    codeEvidence: [],
   });
 
   const diagrams = renderDiagrams(model);
@@ -2220,7 +2814,7 @@ test("screen navigation renders route redirects as route nodes", () => {
   assert.doesNotMatch(navigation, /^  s\d+\[\/order\/next\.action\]$/mu);
   assert.match(
     navigation,
-    new RegExp(`^  ${routeIds.get("/order/start.action")} -->\\|success\\| ${routeIds.get("/order/next.action")}$`, "mu"),
+    new RegExp(`^  ${routeIds.get("/order/start.action")} -[.]->\\|success \\[configured candidate\\]\\| ${routeIds.get("/order/next.action")}$`, "mu"),
   );
 });
 
@@ -2258,7 +2852,7 @@ test("module flowcharts render later route steps instead of resetting to the ori
   assert.equal((moduleBlock.match(/^  n\d+\(\[\/order\/(?:start|next)[.]action\]\)$/gmu) ?? []).length, 2);
   assert.match(
     moduleBlock,
-    new RegExp(`^  ${routes.get("/order/start.action")} -->\\|redirects_to\\| ${routes.get("/order/next.action")}$`, "mu"),
+    new RegExp(`^  ${routes.get("/order/start.action")} -[.]->\\|redirects_to \\[configured candidate\\]\\| ${routes.get("/order/next.action")}$`, "mu"),
   );
 });
 

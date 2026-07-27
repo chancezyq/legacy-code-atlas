@@ -1,5 +1,28 @@
 import { createEvidenceLocator } from "../evidence.mjs";
 
+const NON_TYPE_STATEMENT_KEYWORDS = new Set([
+  "assert",
+  "break",
+  "case",
+  "continue",
+  "else",
+  "return",
+  "throw",
+  "yield",
+]);
+
+const TYPE_DECLARATION_MODIFIERS = new Set([
+  "abstract",
+  "final",
+  "non-sealed",
+  "private",
+  "protected",
+  "public",
+  "sealed",
+  "static",
+  "strictfp",
+]);
+
 function blankCharacter(character) {
   return character === "\n" || character === "\r" ? character : " ";
 }
@@ -73,16 +96,79 @@ function maskJavaStrings(content) {
   return output;
 }
 
-function matchingBrace(masked, openOffset) {
+function matchingDelimiter(masked, openOffset, openCharacter, closeCharacter) {
   let depth = 0;
   for (let index = openOffset; index < masked.length; index += 1) {
-    if (masked[index] === "{") depth += 1;
-    else if (masked[index] === "}") {
+    if (masked[index] === openCharacter) depth += 1;
+    else if (masked[index] === closeCharacter) {
       depth -= 1;
       if (depth === 0) return index;
     }
   }
   return masked.length - 1;
+}
+
+function matchingBrace(masked, openOffset) {
+  return matchingDelimiter(masked, openOffset, "{", "}");
+}
+
+function typeDeclarationModifiers(masked, declarationOffset) {
+  let parentheses = 0;
+  let brackets = 0;
+  let declarationStart = 0;
+  for (let index = declarationOffset - 1; index >= 0; index -= 1) {
+    const character = masked[index];
+    if (character === ")") parentheses += 1;
+    else if (character === "(" && parentheses > 0) parentheses -= 1;
+    else if (character === "]") brackets += 1;
+    else if (character === "[" && brackets > 0) brackets -= 1;
+    else if (parentheses === 0 && brackets === 0 && ";{}".includes(character)) {
+      declarationStart = index + 1;
+      break;
+    }
+  }
+
+  const modifiers = new Set();
+  let cursor = declarationStart;
+  while (cursor < declarationOffset) {
+    while (cursor < declarationOffset && /\s/u.test(masked[cursor])) cursor += 1;
+    if (cursor >= declarationOffset) break;
+    if (masked[cursor] === "@") {
+      const annotation = masked.slice(cursor + 1, declarationOffset)
+        .match(/^[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*/u)?.[0];
+      if (!annotation) return new Set();
+      cursor += annotation.length + 1;
+      while (cursor < declarationOffset && /\s/u.test(masked[cursor])) cursor += 1;
+      if (masked[cursor] === "(") {
+        const annotationEnd = matchingDelimiter(masked, cursor, "(", ")");
+        if (annotationEnd >= declarationOffset) return new Set();
+        cursor = annotationEnd + 1;
+      }
+      continue;
+    }
+    const modifier = masked.slice(cursor, declarationOffset)
+      .match(/^(?:non-sealed|[A-Za-z_$][\w$]*)\b/u)?.[0];
+    if (!modifier || !TYPE_DECLARATION_MODIFIERS.has(modifier)) return new Set();
+    modifiers.add(modifier);
+    cursor += modifier.length;
+  }
+  return modifiers;
+}
+
+function braceDepthsAt(masked, offsets) {
+  const depths = new Map();
+  const ordered = [...new Set(offsets)].sort((left, right) => left - right);
+  let cursor = 0;
+  let depth = 0;
+  for (const offset of ordered) {
+    while (cursor < offset) {
+      if (masked[cursor] === "{") depth += 1;
+      else if (masked[cursor] === "}") depth -= 1;
+      cursor += 1;
+    }
+    depths.set(offset, depth);
+  }
+  return depths;
 }
 
 function splitTopLevel(value) {
@@ -140,14 +226,254 @@ function parameterDescriptors(value) {
   });
 }
 
-function enclosingMethod(methods, offset) {
-  return methods.find((method) => offset >= method.bodyStart && offset <= method.bodyEnd) ?? null;
+function innermostEnclosingMethod(methods, offset) {
+  return methods
+    .filter((method) => offset >= method.bodyStart && offset <= method.bodyEnd)
+    .sort((left, right) => (left.bodyEnd - left.bodyStart) - (right.bodyEnd - right.bodyStart))[0] ?? null;
+}
+
+function simpleReturnType(value) {
+  return String(value ?? "")
+    .replace(/<.*>/g, "")
+    .replace(/\[\s*\]$/g, "")
+    .trim()
+    .split(".")
+    .at(-1);
+}
+
+function isSwitchRuleArrow(masked, arrowOffset) {
+  const boundary = Math.max(
+    masked.lastIndexOf(";", arrowOffset - 1),
+    masked.lastIndexOf("{", arrowOffset - 1),
+    masked.lastIndexOf("}", arrowOffset - 1),
+  );
+  const candidate = masked.slice(boundary + 1, arrowOffset).trim();
+  const keyword = candidate.match(/^(case|default)\b/u)?.[1];
+  if (!keyword) return false;
+
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  let ternaryDepth = 0;
+  for (let index = keyword.length; index < candidate.length; index += 1) {
+    const character = candidate[index];
+    if (character === "(") parentheses += 1;
+    else if (character === ")") parentheses -= 1;
+    else if (character === "[") brackets += 1;
+    else if (character === "]") brackets -= 1;
+    else if (character === "{") braces += 1;
+    else if (character === "}") braces -= 1;
+    else if (parentheses === 0 && brackets === 0 && braces === 0
+      && character === "-" && candidate[index + 1] === ">") {
+      return false;
+    } else if (parentheses === 0 && brackets === 0 && braces === 0 && character === "?") {
+      ternaryDepth += 1;
+    } else if (parentheses === 0 && brackets === 0 && braces === 0 && character === ":") {
+      if (candidate[index - 1] === ":" || candidate[index + 1] === ":") continue;
+      if (ternaryDepth === 0) return false;
+      ternaryDepth -= 1;
+    }
+    if (parentheses < 0 || brackets < 0 || braces < 0) return false;
+  }
+  return parentheses === 0 && brackets === 0 && braces === 0 && ternaryDepth === 0;
+}
+
+function skipWhitespace(masked, offset) {
+  let cursor = offset;
+  while (cursor < masked.length && /\s/u.test(masked[cursor])) cursor += 1;
+  return cursor;
+}
+
+function identifierEnd(masked, offset) {
+  return offset + (masked.slice(offset).match(/^[A-Za-z_$][\w$]*/u)?.[0].length ?? 0);
+}
+
+function typeAnnotationEnd(masked, offset) {
+  let cursor = skipWhitespace(masked, offset + 1);
+  let segmentEnd = identifierEnd(masked, cursor);
+  if (segmentEnd === cursor) return -1;
+  cursor = segmentEnd;
+  while (true) {
+    const dot = skipWhitespace(masked, cursor);
+    if (masked[dot] !== ".") {
+      cursor = dot;
+      break;
+    }
+    cursor = skipWhitespace(masked, dot + 1);
+    segmentEnd = identifierEnd(masked, cursor);
+    if (segmentEnd === cursor) return -1;
+    cursor = segmentEnd;
+  }
+  if (masked[cursor] !== "(") return cursor;
+  const close = matchingDelimiter(masked, cursor, "(", ")");
+  return masked[close] === ")" ? close + 1 : -1;
+}
+
+function typeArgumentsEnd(masked, offset) {
+  let depth = 0;
+  for (let cursor = offset; cursor < masked.length; cursor += 1) {
+    if (masked[cursor] === "<") depth += 1;
+    else if (masked[cursor] === ">") {
+      depth -= 1;
+      if (depth === 0) return cursor + 1;
+    } else if (depth > 0 && ";{}".includes(masked[cursor])) {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+function classInstanceCreationArgumentsStart(masked, newOffset) {
+  if (masked.slice(newOffset, newOffset + 3) !== "new"
+    || /[\w$]/u.test(masked[newOffset - 1] ?? "")
+    || /[\w$]/u.test(masked[newOffset + 3] ?? "")) return -1;
+
+  let cursor = skipWhitespace(masked, newOffset + 3);
+  let expectIdentifier = true;
+  let sawTypeName = false;
+  while (cursor < masked.length) {
+    cursor = skipWhitespace(masked, cursor);
+    if (masked[cursor] === "@") {
+      cursor = typeAnnotationEnd(masked, cursor);
+      if (cursor === -1) return -1;
+      continue;
+    }
+    if (expectIdentifier) {
+      if (!sawTypeName && masked[cursor] === "<") {
+        cursor = typeArgumentsEnd(masked, cursor);
+        if (cursor === -1) return -1;
+        continue;
+      }
+      const end = identifierEnd(masked, cursor);
+      if (end === cursor) return -1;
+      sawTypeName = true;
+      expectIdentifier = false;
+      cursor = end;
+      continue;
+    }
+    if (masked[cursor] === "<") {
+      cursor = typeArgumentsEnd(masked, cursor);
+      if (cursor === -1) return -1;
+      continue;
+    }
+    if (masked[cursor] === ".") {
+      expectIdentifier = true;
+      cursor += 1;
+      continue;
+    }
+    return masked[cursor] === "(" && sawTypeName ? cursor : -1;
+  }
+  return -1;
+}
+
+function explicitGenericMethodArgumentsStart(masked, angleOffset) {
+  if (masked[angleOffset] !== "<") return -1;
+  let dot = angleOffset - 1;
+  while (dot >= 0 && /\s/u.test(masked[dot])) dot -= 1;
+  if (masked[dot] !== ".") return -1;
+  let receiverEnd = dot - 1;
+  while (receiverEnd >= 0 && /\s/u.test(masked[receiverEnd])) receiverEnd -= 1;
+  if (!/[\w$)\]>]/u.test(masked[receiverEnd] ?? "")) return -1;
+
+  let cursor = typeArgumentsEnd(masked, angleOffset);
+  if (cursor === -1) return -1;
+  cursor = skipWhitespace(masked, cursor);
+  const methodEnd = identifierEnd(masked, cursor);
+  if (methodEnd === cursor) return -1;
+  cursor = skipWhitespace(masked, methodEnd);
+  return masked[cursor] === "(" ? cursor : -1;
+}
+
+function lambdaBlockRanges(masked) {
+  const ranges = [];
+  for (const match of masked.matchAll(/->/g)) {
+    const arrowOffset = match.index;
+    if (isSwitchRuleArrow(masked, arrowOffset)) continue;
+    let expressionStart = arrowOffset + match[0].length;
+    while (expressionStart < masked.length && /\s/u.test(masked[expressionStart])) expressionStart += 1;
+    if (masked[expressionStart] === "{") {
+      ranges.push({ start: arrowOffset, end: matchingBrace(masked, expressionStart) });
+      continue;
+    }
+
+    let parentheses = 0;
+    let brackets = 0;
+    let braces = 0;
+    let expressionEnd = masked.length;
+    for (let index = expressionStart; index < masked.length; index += 1) {
+      const constructorArguments = classInstanceCreationArgumentsStart(masked, index);
+      if (constructorArguments !== -1) {
+        index = constructorArguments - 1;
+        continue;
+      }
+      const genericMethodArguments = explicitGenericMethodArgumentsStart(masked, index);
+      if (genericMethodArguments !== -1) {
+        index = genericMethodArguments - 1;
+        continue;
+      }
+      const character = masked[index];
+      if (character === "(") parentheses += 1;
+      else if (character === ")") {
+        if (parentheses === 0 && brackets === 0 && braces === 0) {
+          expressionEnd = index;
+          break;
+        }
+        parentheses -= 1;
+      } else if (character === "[") brackets += 1;
+      else if (character === "]") {
+        if (brackets === 0 && parentheses === 0 && braces === 0) {
+          expressionEnd = index;
+          break;
+        }
+        brackets -= 1;
+      } else if (character === "{") braces += 1;
+      else if (character === "}") {
+        if (braces === 0 && parentheses === 0 && brackets === 0) {
+          expressionEnd = index;
+          break;
+        }
+        braces -= 1;
+      } else if ((character === "," || character === ";")
+        && parentheses === 0 && brackets === 0 && braces === 0) {
+        expressionEnd = index;
+        break;
+      }
+    }
+    ranges.push({ start: arrowOffset, end: expressionEnd });
+  }
+  return ranges;
+}
+
+function anonymousClassRanges(masked) {
+  const ranges = [];
+  for (const match of masked.matchAll(/\bnew\b/g)) {
+    const argumentsStart = classInstanceCreationArgumentsStart(masked, match.index);
+    if (argumentsStart === -1) continue;
+    const argumentsEnd = matchingDelimiter(masked, argumentsStart, "(", ")");
+    if (masked[argumentsEnd] !== ")") continue;
+    let bodyStart = argumentsEnd + 1;
+    while (bodyStart < masked.length && /\s/u.test(masked[bodyStart])) bodyStart += 1;
+    if (masked[bodyStart] !== "{") continue;
+    ranges.push({ start: bodyStart, end: matchingBrace(masked, bodyStart) });
+  }
+  return ranges;
+}
+
+function isInsideRange(ranges, offset) {
+  return ranges.some((range) => offset > range.start && offset < range.end);
 }
 
 function owningType(types, offset) {
   return types
     .filter((type) => offset >= type.bodyStart && offset <= type.bodyEnd)
     .sort((left, right) => (left.bodyEnd - left.bodyStart) - (right.bodyEnd - right.bodyStart))[0] ?? null;
+}
+
+function factEnclosingMethod(methods, types, blockedRanges, offset) {
+  if (isInsideRange(blockedRanges, offset)) return null;
+  const method = innermostEnclosingMethod(methods, offset);
+  if (!method?.ownerType) return null;
+  return owningType(types, offset)?.fullName === method.ownerType ? method : null;
 }
 
 function isIbatisInvocation(source, offset, ownerType, fields) {
@@ -170,14 +496,49 @@ export function parseJava(content, filePath) {
 
   const types = [];
   const typePattern = /\b(class|interface|enum)\s+([A-Za-z_$][\w$]*)(?:\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?(?:\s*<[^>{}]+>)?))?(?:\s+implements\s+([^\{]+))?\s*\{/g;
-  for (const match of source.matchAll(typePattern)) {
+  const typeMatches = [...source.matchAll(typePattern)];
+  const typeBraceDepths = braceDepthsAt(masked, typeMatches.flatMap((match) => [
+    match.index,
+    match.index + match[0].lastIndexOf("{"),
+  ]));
+  for (const match of typeMatches) {
     const name = match[2];
     const bodyStart = match.index + match[0].lastIndexOf("{");
     const bodyEnd = matchingBrace(masked, bodyStart);
+    const parent = owningType(types, match.index);
+    const declarationDepth = typeBraceDepths.get(match.index);
+    const directMember = parent
+      && declarationDepth === typeBraceDepths.get(parent.bodyStart) + 1;
+    const topLevel = !parent && declarationDepth === 0;
+    const modifiers = typeDeclarationModifiers(masked, match.index);
+    const staticMember = Boolean(
+      directMember && (
+        modifiers.has("static")
+        || parent.kind === "interface"
+        || match[1] === "interface"
+        || match[1] === "enum"
+      ),
+    );
+    const topLevelName = packageName ? `${packageName}.${name}` : name;
+    const fullName = topLevel
+      ? topLevelName
+      : directMember
+        ? `${parent.fullName}$${name}`
+        : parent
+          ? `${parent.fullName}$local$${name}$${match.index}`
+          : `${topLevelName}$nested$${match.index}`;
+    const canonicalName = topLevel
+      ? topLevelName
+      : directMember && parent.canonicalName
+        ? `${parent.canonicalName}.${name}`
+        : "";
     types.push({
       kind: match[1],
       name,
-      fullName: packageName ? `${packageName}.${name}` : name,
+      fullName,
+      ...(canonicalName ? { canonicalName } : {}),
+      topLevel,
+      staticMember,
       extendsType: (match[3] ?? "").replace(/\s*<.*>/g, ""),
       implementsTypes: typeList(match[4]),
       evidence: locator.at(match.index, match[0].length),
@@ -188,8 +549,14 @@ export function parseJava(content, filePath) {
 
   const fields = [];
   const fieldPattern = /^[ \t]*(?:public|protected|private)\s+(?:(?:static|final|volatile|transient)\s+)*([A-Za-z_$][\w$.]*(?:\s*<[A-Za-z_$][\w$.,? <>\[\]]*>)?(?:\s*\[\])?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;]*)?;/gm;
-  for (const match of source.matchAll(fieldPattern)) {
+  const fieldMatches = [...source.matchAll(fieldPattern)];
+  const fieldBraceDepths = braceDepthsAt(masked, [
+    ...types.map((type) => type.bodyStart),
+    ...fieldMatches.map((match) => match.index),
+  ]);
+  for (const match of fieldMatches) {
     const owner = owningType(types, match.index);
+    if (!owner || fieldBraceDepths.get(match.index) !== fieldBraceDepths.get(owner.bodyStart) + 1) continue;
     fields.push({
       type: match[1].replace(/\s+/g, ""),
       name: match[2],
@@ -199,15 +566,27 @@ export function parseJava(content, filePath) {
   }
 
   const methods = [];
-  const methodPattern = /^[ \t]*(?:(?:public|protected|private|static|final|synchronized|abstract|native|strictfp)\s+)*([A-Za-z_$][\w$<>,.?\[\] \t]*?)\s+([A-Za-z_$][\w$]*)\s*\(((?:[^()]|\([^()]*\))*)\)\s*(?:throws\s+[^\{;]+)?([\{;])/gm;
-  for (const match of source.matchAll(methodPattern)) {
-    const openOffset = match.index + match[0].lastIndexOf(match[4]);
-    const bodyEnd = match[4] === "{" ? matchingBrace(masked, openOffset) : openOffset;
-    const owner = owningType(types, match.index);
-    const descriptors = parameterDescriptors(match[3]);
+  const methodPattern = /^[ \t]*((?:(?:public|protected|private|static|final|synchronized|abstract|native|strictfp)\s+)*)([A-Za-z_$][\w$<>,.?\[\] \t]*?)\s+([A-Za-z_$][\w$]*)\s*\(((?:[^()]|\([^()]*\))*)\)\s*(?:throws\s+[^\{;]+)?([\{;])/gm;
+  const methodMatches = [...source.matchAll(methodPattern)];
+  const braceDepths = braceDepthsAt(masked, [
+    ...types.map((type) => type.bodyStart),
+    ...methodMatches.map((match) => match.index),
+  ]);
+  for (const match of methodMatches) {
+    const returnTypeKeyword = match[2].trim().split(/\s+/u)[0];
+    if (NON_TYPE_STATEMENT_KEYWORDS.has(returnTypeKeyword)) continue;
+    const openOffset = match.index + match[0].lastIndexOf(match[5]);
+    const bodyEnd = match[5] === "{" ? matchingBrace(masked, openOffset) : openOffset;
+    const candidateOwner = owningType(types, match.index);
+    const owner = candidateOwner
+      && braceDepths.get(match.index) === braceDepths.get(candidateOwner.bodyStart) + 1
+      ? candidateOwner
+      : null;
+    const descriptors = parameterDescriptors(match[4]);
     methods.push({
-      name: match[2],
-      returnType: match[1],
+      name: match[3],
+      visibility: match[1].match(/\b(public|protected|private)\b/u)?.[1] ?? "package",
+      returnType: match[2],
       parameters: descriptors.map((parameter) => parameter.name),
       parameterTypes: descriptors.map((parameter) => parameter.type),
       methodSignature: descriptors.map((parameter) => parameter.type).join(","),
@@ -215,16 +594,53 @@ export function parseJava(content, filePath) {
       bodyEnd,
       ownerType: owner?.fullName ?? "",
       evidence: locator.at(match.index, match[0].length),
+      returnedResults: [],
     });
+  }
+
+  const lambdaRanges = lambdaBlockRanges(masked);
+  const anonymousRanges = anonymousClassRanges(masked);
+  const blockedFactRanges = [...anonymousRanges, ...lambdaRanges];
+  const returnedResultPatterns = [
+    {
+      kind: "struts1-find-forward",
+      returnType: "ActionForward",
+      pattern: /\breturn\s+[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\.\s*findForward\s*\(\s*"([^"\\]*)"\s*\)\s*;/g,
+    },
+    {
+      kind: "string-literal",
+      returnType: "String",
+      pattern: /\breturn\s*"([^"\\]*)"\s*;/g,
+    },
+  ];
+  for (const resultPattern of returnedResultPatterns) {
+    for (const match of source.matchAll(resultPattern.pattern)) {
+      if (masked.slice(match.index, match.index + "return".length) !== "return") continue;
+      const ownerMethod = factEnclosingMethod(methods, types, blockedFactRanges, match.index);
+      if (!ownerMethod || simpleReturnType(ownerMethod.returnType) !== resultPattern.returnType) continue;
+      ownerMethod.returnedResults.push({
+        name: match[1],
+        kind: resultPattern.kind,
+        evidence: locator.at(match.index, match[0].length),
+        offset: match.index,
+      });
+    }
+  }
+  for (const method of methods) {
+    method.returnedResults = method.returnedResults
+      .sort((left, right) => left.offset - right.offset)
+      .map(({ offset: _offset, ...returnedResult }) => returnedResult);
   }
 
   const localVariables = [];
   const localVariablePattern = /\b(?:(?:final|volatile)\s+)?([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;\n{}()]+>)?(?:\s*\[\])?)\s+([A-Za-z_$][\w$]*)\s*(?==|;|,)/g;
   for (const match of masked.matchAll(localVariablePattern)) {
-    const ownerMethod = enclosingMethod(methods, match.index);
+    const type = match[1].replace(/\s+/g, "");
+    if (NON_TYPE_STATEMENT_KEYWORDS.has(type)) continue;
+    const ownerMethod = factEnclosingMethod(methods, types, blockedFactRanges, match.index);
     if (!ownerMethod) continue;
     localVariables.push({
-      type: match[1].replace(/\s+/g, ""),
+      type,
       name: match[2],
       ownerType: ownerMethod.ownerType,
       enclosingMethod: ownerMethod.name,
@@ -238,7 +654,7 @@ export function parseJava(content, filePath) {
   const calls = [];
   const callPattern = /\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
   for (const match of masked.matchAll(callPattern)) {
-    const ownerMethod = enclosingMethod(methods, match.index);
+    const ownerMethod = factEnclosingMethod(methods, types, blockedFactRanges, match.index);
     if (!ownerMethod) continue;
     calls.push({
       receiver: match[1],
@@ -253,7 +669,7 @@ export function parseJava(content, filePath) {
   }
   const methodReturnCallPattern = /\b([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*\)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
   for (const match of masked.matchAll(methodReturnCallPattern)) {
-    const ownerMethod = enclosingMethod(methods, match.index);
+    const ownerMethod = factEnclosingMethod(methods, types, blockedFactRanges, match.index);
     if (!ownerMethod) continue;
     const receiver = match[1].replace(/\s+/g, "");
     const receiverParts = receiver.split(".");
@@ -275,15 +691,22 @@ export function parseJava(content, filePath) {
 
   const stringConstants = [];
   const stringConstantPattern = /\b(?:(?:public|protected|private)\s+)?(?:(?:static|final)\s+)*String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"\s*;/g;
-  for (const match of source.matchAll(stringConstantPattern)) {
+  const stringConstantMatches = [...source.matchAll(stringConstantPattern)];
+  const stringConstantBraceDepths = braceDepthsAt(masked, [
+    ...types.map((type) => type.bodyStart),
+    ...stringConstantMatches.map((match) => match.index),
+  ]);
+  for (const match of stringConstantMatches) {
     const owner = owningType(types, match.index);
+    if (!owner
+      || stringConstantBraceDepths.get(match.index) !== stringConstantBraceDepths.get(owner.bodyStart) + 1) continue;
     stringConstants.push({ name: match[1], value: match[2], ownerType: owner?.fullName ?? "" });
   }
 
   const statementUses = [];
   const statementPattern = /\b(queryForObject|queryForList|queryForMap|insert|update|delete)\s*\(\s*(?:"([^"]+)"|([A-Za-z_$][\w$]*))/g;
   for (const match of source.matchAll(statementPattern)) {
-    const ownerMethod = enclosingMethod(methods, match.index);
+    const ownerMethod = factEnclosingMethod(methods, types, blockedFactRanges, match.index);
     if (!ownerMethod || !isIbatisInvocation(source, match.index, ownerMethod.ownerType, fields)) continue;
     const literal = match[2] ?? "";
     const variable = match[3] ?? "";

@@ -78,10 +78,17 @@ function citation(evidence) {
   return `${renderInlineText(evidence.file)}:${evidence.line}`;
 }
 
-function confidenceNote(useCase) {
-  return useCase.minConfidence >= 0.95
-    ? `Confidence ${useCase.minConfidence.toFixed(2)}`
-    : `Confidence ${useCase.minConfidence.toFixed(2)} (contains heuristic relationships; review manually)`;
+function confidenceNote(confidence, label = "Confidence") {
+  return confidence >= 0.95
+    ? `${label} ${confidence.toFixed(2)}`
+    : `${label} ${confidence.toFixed(2)} (contains heuristic relationships; review manually)`;
+}
+
+function flowMinimumConfidence(flow) {
+  return flow.reduce(
+    (minimum, step) => Math.min(minimum, typeof step.confidence === "number" ? step.confidence : 1),
+    1,
+  );
 }
 
 const TRIGGER_LABELS = new Map([
@@ -107,6 +114,39 @@ const ARRIVAL_LABELS = new Map([
   ["puts", "Tiles put"],
   ["uses_template", "Tiles template"],
 ]);
+
+function outcomeMarker(classification, compact = false) {
+  if (classification === "code-confirmed") {
+    return compact ? "[code-returned possibility]" : "[code-returned possibility]";
+  }
+  if (classification === "configured-candidate") {
+    return compact
+      ? "[configured candidate]"
+      : "[configured candidate; not code-confirmed by this index]";
+  }
+  return "";
+}
+
+function outcomeEvidenceText(outcome) {
+  const parts = [];
+  const configRef = citation(outcome.configEvidence ?? outcome.evidence);
+  if (configRef) parts.push(`configuration ${configRef}`);
+  const codeRefs = [...new Set((outcome.codeEvidence ?? []).map(citation).filter(Boolean))];
+  if (codeRefs.length > 0) parts.push(`code ${codeRefs.join(", ")}`);
+  return parts.join("; ");
+}
+
+function flowStepText(step) {
+  const via = step.via ? ` (via ${renderInlineText(step.via)})` : "";
+  const marker = outcomeMarker(step.classification);
+  const evidence = marker
+    ? outcomeEvidenceText(step)
+    : citation(step.evidence);
+  const evidenceText = evidence
+    ? marker ? `, ${evidence}` : `, evidence ${evidence}`
+    : "";
+  return `${renderInlineText(step.nodeType)} ${renderInlineText(step.name)}${via}${marker ? ` ${marker}` : ""}${evidenceText}`;
+}
 
 function tableCell(value) {
   return renderInlineText(value).replaceAll("|", "\\|").replaceAll("\n", " ");
@@ -159,7 +199,7 @@ export function renderUseCases(model) {
         `### Use case: ${renderInlineText(useCase.route)}`,
         "",
         `- Source: ${source || "no direct evidence"}`,
-        `- ${confidenceNote(useCase)}`,
+        `- ${confidenceNote(useCase.minConfidence, "Main-flow confidence")}`,
       );
       if (useCase.request.methods.length > 0 || useCase.request.hasUnknownMethod) {
         const methods = useCase.request.methods.length === 0
@@ -167,7 +207,13 @@ export function renderUseCases(model) {
           : useCase.request.hasUnknownMethod
             ? `known methods ${useCase.request.methods.join("/")}; other methods unresolved`
             : useCase.request.methods.join("/");
-        writer.line(`- Request: ${methods}${useCase.request.parameters.length > 0 ? `, parameters ${useCase.request.parameters.map((name) => `\`${renderInlineText(name)}\``).join(", ")}` : ""}`);
+        const parameters = useCase.request.parameters.length > 0
+          ? `, parameters ${useCase.request.parameters.map((name) => `\`${renderInlineText(name)}\``).join(", ")}`
+          : "";
+        const dynamicNames = useCase.request.hasDynamicParameterNames
+          ? ", additional parameter names resolved at runtime"
+          : "";
+        writer.line(`- Request: ${methods}${parameters}${dynamicNames}`);
       }
       if (useCase.triggers.length > 0) {
         writer.line("- Triggers:");
@@ -185,9 +231,7 @@ export function renderUseCases(model) {
       }
       writer.line("- Main flow:");
       for (const step of useCase.mainFlow) {
-        const via = step.via ? ` (via ${renderInlineText(step.via)})` : "";
-        const ref = citation(step.evidence);
-        writer.line(`  ${step.index}. ${renderInlineText(step.nodeType)} ${renderInlineText(step.name)}${via}${ref ? `, evidence ${ref}` : ""}`);
+        writer.line(`  ${step.index}. ${flowStepText(step)}`);
       }
       if (useCase.flowDisplayTruncated
         ?? (useCase.flowTruncated && useCase.flowTraversalTruncated !== true)) {
@@ -196,12 +240,33 @@ export function renderUseCases(model) {
       if (useCase.flowTraversalTruncated) {
         writer.line("  - (flow traversal limit reached; additional branches may be omitted)");
       }
+      if (useCase.alternateFlows?.length > 0) {
+        writer.line("- Additional data flow branches:");
+        for (let flowIndex = 0; flowIndex < useCase.alternateFlows.length; flowIndex += 1) {
+          const flow = useCase.alternateFlows[flowIndex];
+          const confidence = useCase.alternateFlowConfidences?.[flowIndex]
+            ?? flowMinimumConfidence(flow);
+          writer.line(`  - Branch ${flowIndex + 1}: ${confidenceNote(confidence, "confidence")}`);
+          for (const step of flow) {
+            writer.line(`    ${step.index}. ${flowStepText(step)}`);
+          }
+        }
+      }
+      if (useCase.alternateFlowsTruncated) {
+        writer.line("  - (additional data flow branches were truncated)");
+      }
       if (useCase.outcomes.length > 0) {
         writer.line("- Outcomes:");
         for (const outcome of useCase.outcomes) {
           const kind = OUTCOME_LABELS.get(outcome.kind) ?? outcome.kind;
-          const ref = citation(outcome.evidence);
-          writer.line(`  - ${renderInlineText(outcome.reason || "result")}: ${kind} ${renderInlineText(outcome.target)}${ref ? ` (${ref})` : ""}`);
+          const marker = outcomeMarker(outcome.classification);
+          if (marker) {
+            const evidence = outcomeEvidenceText(outcome);
+            writer.line(`  - ${marker} ${renderInlineText(outcome.reason || "result")}: ${kind} ${renderInlineText(outcome.target)}${evidence ? `; ${evidence}` : ""}`);
+          } else {
+            const ref = citation(outcome.evidence);
+            writer.line(`  - ${renderInlineText(outcome.reason || "result")}: ${kind} ${renderInlineText(outcome.target)}${ref ? ` (${ref})` : ""}`);
+          }
         }
       }
       if (useCase.statements.length > 0) {
@@ -265,8 +330,14 @@ export function renderUiSpec(model) {
       writer.line("- Arrival paths:");
       for (const arrival of page.arrivals) {
         const kind = ARRIVAL_LABELS.get(arrival.kind) ?? arrival.kind;
-        const ref = citation(arrival.evidence);
-        writer.line(`  - ${kind} from ${renderInlineText(arrival.fromType)} ${renderInlineText(arrival.from)}${ref ? ` (${ref})` : ""}`);
+        const marker = outcomeMarker(arrival.classification);
+        if (marker) {
+          const evidence = outcomeEvidenceText(arrival);
+          writer.line(`  - ${marker} ${kind} from ${renderInlineText(arrival.fromType)} ${renderInlineText(arrival.from)}${evidence ? `; ${evidence}` : ""}`);
+        } else {
+          const ref = citation(arrival.evidence);
+          writer.line(`  - ${kind} from ${renderInlineText(arrival.fromType)} ${renderInlineText(arrival.from)}${ref ? ` (${ref})` : ""}`);
+        }
       }
     }
     if (page.arrivalsTruncated) writer.line("  - (additional arrival paths were truncated)");
@@ -275,11 +346,23 @@ export function renderUiSpec(model) {
 }
 
 function moduleFlowchart(module, writer) {
+  const alternateFlowsTruncated = module.useCases.some(
+    (useCase) => useCase.alternateFlowsTruncated === true,
+  );
   const nodeIds = new Map();
   const nodeLines = [];
   const edges = new Map();
-  const addEdge = (source, target, line, heuristic = false) => {
-    if (!edges.has(line)) edges.set(line, { source, target, line, heuristic });
+  const addEdge = (
+    source,
+    target,
+    line,
+    heuristic = false,
+    candidate = false,
+    aggregated = false,
+  ) => {
+    if (!edges.has(line)) {
+      edges.set(line, { source, target, line, heuristic, candidate, aggregated });
+    }
   };
   const idFor = (key, label, shapeOpen, shapeClose) => {
     let id = nodeIds.get(key);
@@ -303,52 +386,57 @@ function moduleFlowchart(module, writer) {
       );
     }
     const flowTableAccess = new Map();
-    let previousId = routeId;
-    for (let index = 0; index < useCase.mainFlow.length; index += 1) {
-      const step = useCase.mainFlow[index];
-      if (index === 0 && step.nodeType === "route") {
-        continue;
-      }
-      let shapeOpen = "[";
-      let shapeClose = "]";
-      if (step.nodeType === "java_method" || step.nodeType === "java_type") {
-        shapeOpen = "[[";
-        shapeClose = "]]";
-      } else if (step.nodeType === "statement" || step.nodeType === "procedure") {
-        shapeOpen = "{{";
-        shapeClose = "}}";
-      } else if (step.nodeType === "table") {
-        shapeOpen = "[(";
-        shapeClose = ")]";
-        const access = step.via === "reads_from"
-          ? "read"
-          : step.via === "writes_to"
-            ? "write"
-            : null;
-        if (access) {
-          const represented = flowTableAccess.get(step.name) ?? new Set();
-          represented.add(access);
-          flowTableAccess.set(step.name, represented);
+    const addFlow = (flow) => {
+      let previousId = routeId;
+      for (let index = 0; index < flow.length; index += 1) {
+        const step = flow[index];
+        if (index === 0 && step.nodeType === "route") continue;
+        let shapeOpen = "[";
+        let shapeClose = "]";
+        if (step.nodeType === "java_method" || step.nodeType === "java_type") {
+          shapeOpen = "[[";
+          shapeClose = "]]";
+        } else if (step.nodeType === "statement" || step.nodeType === "procedure") {
+          shapeOpen = "{{";
+          shapeClose = "}}";
+        } else if (step.nodeType === "table") {
+          shapeOpen = "[(";
+          shapeClose = ")]";
+          const access = step.via === "reads_from"
+            ? "read"
+            : step.via === "writes_to"
+              ? "write"
+              : null;
+          if (access) {
+            const represented = flowTableAccess.get(step.name) ?? new Set();
+            represented.add(access);
+            flowTableAccess.set(step.name, represented);
+          }
+        } else if (step.nodeType === "route") {
+          shapeOpen = "([";
+          shapeClose = "])";
         }
-      } else if (step.nodeType === "route") {
-        shapeOpen = "([";
-        shapeClose = "])";
+        const stepId = idFor(
+          step.nodeId ?? `${step.nodeType}:${step.name}`,
+          step.name,
+          shapeOpen,
+          shapeClose,
+        );
+        const heuristic = step.confidence < 0.95;
+        const candidate = step.classification === "configured-candidate";
+        const marker = outcomeMarker(step.classification, true);
+        addEdge(
+          previousId,
+          stepId,
+          `  ${previousId} ${heuristic || candidate ? "-.->" : "-->"}|${mermaidLabel(step.via ?? "flows_to")}${marker ? ` ${marker}` : ""}| ${stepId}`,
+          heuristic,
+          candidate,
+        );
+        previousId = stepId;
       }
-      const stepId = idFor(
-        step.nodeId ?? `${step.nodeType}:${step.name}`,
-        step.name,
-        shapeOpen,
-        shapeClose,
-      );
-      const heuristic = step.confidence < 0.95;
-      addEdge(
-        previousId,
-        stepId,
-        `  ${previousId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(step.via ?? "flows_to")}| ${stepId}`,
-        heuristic,
-      );
-      previousId = stepId;
-    }
+    };
+    addFlow(useCase.mainFlow);
+    for (const alternateFlow of useCase.alternateFlows ?? []) addFlow(alternateFlow);
     for (const table of useCase.tables) {
       const represented = flowTableAccess.get(table.name);
       const accessIsRepresented = table.access === "read-write"
@@ -359,7 +447,10 @@ function moduleFlowchart(module, writer) {
       addEdge(
         routeId,
         tableId,
-        `  ${routeId} -->|${mermaidLabel(ACCESS_LABELS.get(table.access) ?? table.access)}| ${tableId}`,
+        `  ${routeId} -.->|${mermaidLabel(`aggregated ${ACCESS_LABELS.get(table.access) ?? table.access}`)}| ${tableId}`,
+        false,
+        false,
+        true,
       );
     }
   }
@@ -373,11 +464,13 @@ function moduleFlowchart(module, writer) {
     ? nodeLines
     : nodeLines.filter((node) => retainedNodeIds.has(node.id));
   const hasHeuristicEdge = retainedEdges.some((edge) => edge.heuristic);
+  const hasCandidateEdge = retainedEdges.some((edge) => edge.candidate);
+  const hasAggregatedEdge = retainedEdges.some((edge) => edge.aggregated);
   writer.lines(
     "",
     `## Module overview: ${renderInlineText(module.name)}`,
     "",
-    `Legend: rectangles are pages, rounded nodes are routes, double rectangles are Java methods, hexagons are SQL statements or procedures, and cylinders are tables${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}.`,
+    `Legend: rectangles are pages, rounded nodes are routes, double rectangles are Java methods, hexagons are SQL statements or procedures, and cylinders are tables${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}${hasCandidateEdge ? "; dashed edges include configured-only outcome candidates" : ""}${hasAggregatedEdge ? "; dashed shortcut edges summarize table access omitted from displayed flows" : ""}.`,
     "",
     "```mermaid",
     "flowchart LR",
@@ -389,7 +482,8 @@ function moduleFlowchart(module, writer) {
     if (!writer.line(edge.line)) break;
   }
   writer.lines("```");
-  if (!writer.exhausted && sortedEdges.length > MAX_DIAGRAM_EDGES) {
+  if (!writer.exhausted
+    && (sortedEdges.length > MAX_DIAGRAM_EDGES || alternateFlowsTruncated)) {
     writer.lines("", MODEL_TRUNCATION_NOTICE);
   }
 }
@@ -403,8 +497,15 @@ function sequenceDiagram(useCase, writer) {
   });
   for (let index = 1; index < steps.length; index += 1) {
     const heuristic = steps[index].confidence < 0.95;
+    const candidate = steps[index].classification === "configured-candidate";
+    const confirmed = steps[index].classification === "code-confirmed";
     const label = mermaidLabel(steps[index].via ?? "calls");
-    writer.line(`  P${index - 1}${heuristic ? "-->>" : "->>"}P${index}: ${label}${heuristic ? " (heuristic)" : ""}`);
+    const modalities = [];
+    if (candidate) modalities.push("configured candidate");
+    else if (confirmed) modalities.push("code-returned possibility");
+    if (heuristic) modalities.push("heuristic");
+    const modality = modalities.length > 0 ? ` (${modalities.join("; ")})` : "";
+    writer.line(`  P${index - 1}${heuristic || candidate ? "-->>" : "->>"}P${index}: ${label}${modality}`);
   }
   if (useCase.mainFlow.length > steps.length) {
     writer.line(`  Note over P${steps.length - 1}: remaining steps truncated`);
@@ -416,8 +517,8 @@ function navigationDiagram(model, writer) {
   const nodeIds = new Map();
   const nodeLines = [];
   const edges = new Map();
-  const addEdge = (source, target, line, heuristic = false) => {
-    if (!edges.has(line)) edges.set(line, { source, target, line, heuristic });
+  const addEdge = (source, target, line, heuristic = false, candidate = false) => {
+    if (!edges.has(line)) edges.set(line, { source, target, line, heuristic, candidate });
   };
   const idFor = (key, label, shapeOpen = "[", shapeClose = "]") => {
     let id = nodeIds.get(key);
@@ -428,6 +529,26 @@ function navigationDiagram(model, writer) {
     }
     return id;
   };
+  for (const page of model.pages ?? []) {
+    if (!Array.isArray(page.actions) || page.actions.length === 0) continue;
+    const pageKey = page.pageId ?? page.filePath ?? page.name;
+    const pageLabel = page.filePath ?? page.name;
+    const pageId = idFor(`page:${pageKey}`, pageLabel);
+    for (const action of page.actions) {
+      const targetKey = action.targetId ?? action.target;
+      const targetType = action.targetType ?? "route";
+      const targetId = targetType === "route"
+        ? idFor(`route:${targetKey}`, action.target, "([", "])")
+        : idFor(`${targetType}:${targetKey}`, action.target);
+      const heuristic = typeof action.confidence === "number" && action.confidence < 0.95;
+      addEdge(
+        pageId,
+        targetId,
+        `  ${pageId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(action.kind)}| ${targetId}`,
+        heuristic,
+      );
+    }
+  }
   for (const useCase of model.useCases) {
     if (useCase.triggers.length === 0 && useCase.outcomes.length === 0) continue;
     const routeId = idFor(`route:${useCase.routeId ?? useCase.route}`, useCase.route, "([", "])");
@@ -451,11 +572,14 @@ function navigationDiagram(model, writer) {
         ? idFor(`route:${pageKey}`, pageLabel, "([", "])")
         : idFor(`page:${pageKey}`, pageLabel);
       const heuristic = typeof outcome.confidence === "number" && outcome.confidence < 0.95;
+      const candidate = outcome.classification === "configured-candidate";
+      const marker = outcomeMarker(outcome.classification, true);
       addEdge(
         routeId,
         targetId,
-        `  ${routeId} ${heuristic ? "-.->" : "-->"}|${mermaidLabel(outcome.reason || outcome.kind)}| ${targetId}`,
+        `  ${routeId} ${heuristic || candidate ? "-.->" : "-->"}|${mermaidLabel(outcome.reason || outcome.kind)}${marker ? ` ${marker}` : ""}| ${targetId}`,
         heuristic,
+        candidate,
       );
     }
   }
@@ -467,11 +591,12 @@ function navigationDiagram(model, writer) {
   const retainedNodeIds = new Set(retainedEdges.flatMap((edge) => [edge.source, edge.target]));
   const renderedNodeLines = nodeLines.filter((node) => retainedNodeIds.has(node.id));
   const hasHeuristicEdge = retainedEdges.some((edge) => edge.heuristic);
+  const hasCandidateEdge = retainedEdges.some((edge) => edge.candidate);
   writer.lines(
     "",
     "## Screen navigation",
     "",
-    `Legend: rectangles are pages, rounded nodes are routes; edge labels are the navigation trigger or the forward/redirect/composition result${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}.`,
+    `Legend: rectangles are pages, rounded nodes are routes; edge labels are the navigation trigger or the forward/redirect/composition result${hasHeuristicEdge ? "; dashed edges are heuristic relationships (confidence below 0.95)" : ""}${hasCandidateEdge ? "; dashed edges include configured-only outcome candidates" : ""}.`,
     "",
     "```mermaid",
     "flowchart LR",

@@ -44,12 +44,25 @@ function attributeEntriesFrom(tag) {
     if (quote) {
       cursor += 1;
       const valueStart = cursor;
-      while (cursor < tag.length && tag[cursor] !== quote) cursor += 1;
+      while (cursor < tag.length && tag[cursor] !== quote) {
+        if (tag[cursor] === "<" && plausibleEmbeddedTagStart(tag, cursor)) {
+          const embedded = tagEndOffset(tag, cursor);
+          if (embedded.closed) {
+            cursor = embedded.end;
+            continue;
+          }
+        }
+        cursor += 1;
+      }
       entries.push({ name, value: tag.slice(valueStart, cursor), index });
       if (tag[cursor] === quote) cursor += 1;
       continue;
     }
     const valueStart = cursor;
+    if (tag[cursor] === "<" && plausibleEmbeddedTagStart(tag, cursor)) {
+      const embedded = tagEndOffset(tag, cursor);
+      if (embedded.closed) cursor = embedded.end;
+    }
     while (cursor < tag.length && !/[\s>]/u.test(tag[cursor])) {
       if (tag[cursor] === "/" && /^\s*>/u.test(tag.slice(cursor + 1))) break;
       cursor += 1;
@@ -110,20 +123,26 @@ export function webPathForFile(filePath) {
 
 function queryParametersFrom(query) {
   const parameters = {};
+  let hasDynamicParameterNames = false;
   for (const [name, value] of new URLSearchParams(query)) {
-    if (!name || /\$\{|%\{|<%/u.test(name)) continue;
+    if (!name) continue;
+    if (/\$\{|%\{|<%/u.test(name)) {
+      hasDynamicParameterNames = true;
+      continue;
+    }
     const normalizedValue = /\$\{|%\{|<%/u.test(value) ? "" : value;
     if (!Object.hasOwn(parameters, name)) parameters[name] = normalizedValue;
     else if (parameters[name] !== normalizedValue) parameters[name] = "";
   }
-  return parameters;
+  return { parameters, hasDynamicParameterNames };
 }
 
 function requestTarget(rawUrl, basePath = "") {
   const emptyTarget = () => ({ url: "", parameters: {}, queryParameterNames: [] });
   if (rawUrl === undefined || rawUrl === null) return emptyTarget();
-  const cUrl = rawUrl.match(/<c:url\b[^>]*\bvalue\s*=\s*(["'])(.*?)\1[^>]*\/?\s*>/is);
-  let value = cUrl ? cUrl[2] : rawUrl;
+  const sourceValue = String(rawUrl).trim();
+  const cUrl = sourceValue.match(/^<c:url\b[^>]*\bvalue\s*=\s*(["'])(.*?)\1[^>]*\/\s*>$/is);
+  let value = cUrl ? cUrl[2] : sourceValue;
   value = value
     .replace(/\$\{\s*pageContext\.request\.contextPath\s*}/g, "")
     .replace(/\$\{\s*(?:ctx|contextPath)\s*}/g, "")
@@ -136,12 +155,18 @@ function requestTarget(rawUrl, basePath = "") {
   const queryOffset = withoutFragment.indexOf("?");
   const relative = queryOffset === -1 ? withoutFragment : withoutFragment.slice(0, queryOffset);
   const query = queryOffset === -1 ? "" : withoutFragment.slice(queryOffset + 1);
-  const parameters = queryParametersFrom(query);
+  const { parameters, hasDynamicParameterNames } = queryParametersFrom(query);
   const queryParameterNames = Object.keys(parameters);
-  if (/\$\{|%\{|<%/u.test(relative)) return emptyTarget();
+  if (/[<>]|\$\{|%\{|<%/u.test(relative)) return emptyTarget();
   const isRelative = !relative.startsWith("/");
   if (!basePath && isRelative) {
-    return { url: relative, parameters, queryParameterNames, relativeUrl: withoutFragment };
+    return {
+      url: relative,
+      parameters,
+      queryParameterNames,
+      relativeUrl: withoutFragment,
+      ...(hasDynamicParameterNames ? { hasDynamicParameterNames: true } : {}),
+    };
   }
   try {
     const base = `http://legacy.local${String(basePath || "/").startsWith("/") ? basePath || "/" : `/${basePath}`}`;
@@ -149,6 +174,7 @@ function requestTarget(rawUrl, basePath = "") {
       url: new URL(relative, base).pathname.replace(/\/{2,}/g, "/"),
       parameters,
       queryParameterNames,
+      ...(hasDynamicParameterNames ? { hasDynamicParameterNames: true } : {}),
       ...(isRelative ? { relativeUrl: withoutFragment } : {}),
     };
   } catch {
@@ -168,6 +194,10 @@ function requestTargetMetadata(target) {
   return {
     ...requestParameters(target),
     ...(target.queryParameterNames.length > 0 ? { queryParameterNames: target.queryParameterNames } : {}),
+    ...(target.hasDynamicParameterNames === true ? {
+      parametersComplete: false,
+      hasDynamicParameterNames: true,
+    } : {}),
     ...(Object.hasOwn(target, "relativeUrl") ? { relativeUrl: target.relativeUrl } : {}),
   };
 }
@@ -209,8 +239,22 @@ function tagEndOffset(content, start) {
   for (let index = start + 1; index < content.length; index += 1) {
     const character = content[index];
     if (quote) {
+      if (character === "<" && plausibleEmbeddedTagStart(content, index)) {
+        const embedded = tagEndOffset(content, index);
+        if (embedded.closed) {
+          index = embedded.end - 1;
+          continue;
+        }
+      }
       if (character === quote) quote = "";
       continue;
+    }
+    if (character === "<" && plausibleEmbeddedTagStart(content, index)) {
+      const embedded = tagEndOffset(content, index);
+      if (embedded.closed) {
+        index = embedded.end - 1;
+        continue;
+      }
     }
     if (character === '"' || character === "'") {
       quote = character;
@@ -242,6 +286,10 @@ function plausibleTagStart(content, start) {
   cursor += 1;
   while (/[\w:-]/u.test(content[cursor] ?? "")) cursor += 1;
   return /[\s/>]/u.test(content[cursor] ?? "");
+}
+
+function plausibleEmbeddedTagStart(content, start) {
+  return /^<[A-Za-z][\w.-]*:[A-Za-z][\w.-]*(?=[\s/>])/u.test(content.slice(start));
 }
 
 function rawClosingTag(content, tagName, start) {
@@ -511,11 +559,18 @@ function extractTaglibRequests(tags, formRanges, content, locator, pageWebPath) 
     if (!rawUrl) continue;
     const target = markupRequestTarget(rawUrl, pageWebPath);
     if (!target.url || (!isForm && !isLink)) continue;
+    const action = (attributes.action ?? "").trim();
+    const struts2ActionRelative = tag.startsWith("s:")
+      && action
+      && !action.includes("/")
+      && !action.includes("\\")
+      && !Object.hasOwn(attributes, "namespace");
     requests.push({
       kind: isForm ? "form" : "link",
       url: target.url,
       method: isForm ? staticHttpMethod(attributes.method, "POST") : "GET",
       ...requestTargetMetadata(target),
+      ...(struts2ActionRelative ? { struts2ActionRelative: true } : {}),
       evidence: requestEvidence(
         locator,
         match,
@@ -966,6 +1021,8 @@ function decodeVisibleText(value) {
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&amp;/gi, "&")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<\/?[A-Za-z][^>]*>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -974,15 +1031,23 @@ function blankRegion(value) {
   return value.replace(/[^\n\r]/g, " ");
 }
 
-function extractVisibleTextEntries(masked, locator) {
+function extractVisibleTextEntries(masked, locator, tags) {
   const entries = [];
-  for (const match of masked.matchAll(/>([^<]+)</g)) {
-    const text = decodeVisibleText(match[1]);
-    if (!text) continue;
-    const leadingWhitespace = match[1].search(/\S/);
-    const offset = match.index + 1 + Math.max(0, leadingWhitespace);
-    entries.push({ text, evidence: locator.at(offset, match[1].length) });
+  const addRange = (start, end) => {
+    if (end <= start) return;
+    const source = masked.slice(start, end);
+    const text = decodeVisibleText(source);
+    if (!text || !/[\p{L}\p{N}]/u.test(text)) return;
+    const leadingWhitespace = source.search(/\S/u);
+    const offset = start + Math.max(0, leadingWhitespace);
+    entries.push({ text, evidence: locator.at(offset, source.length) });
+  };
+  let cursor = 0;
+  for (const tag of tags) {
+    if (tag.index > cursor) addRange(cursor, tag.index);
+    cursor = Math.max(cursor, tag.end);
   }
+  addRange(cursor, masked.length);
   return entries;
 }
 
@@ -992,10 +1057,21 @@ function isChoiceField(tagName, attributes) {
     || /:(?:checkbox|radio|radiobutton)$/u.test(tagName);
 }
 
-function fieldValue(tagName, attributes) {
-  if (!isChoiceField(tagName, attributes)) return decodeHtmlEntities(attributes.value ?? "");
-  if (!Object.hasOwn(attributes, "checked")) return "";
-  return decodeHtmlEntities(attributes.value || "on");
+function fieldValueState(value) {
+  const decoded = decodeHtmlEntities(value);
+  const runtimeDerived = /\$\{|%\{|<%|<[A-Za-z][\w.-]*:[A-Za-z][\w.-]*(?=[\s/>])/u.test(decoded);
+  return { value: runtimeDerived ? "" : decoded, runtimeDerived };
+}
+
+function attributeFieldValueState(tagName, attributes) {
+  if (!isChoiceField(tagName, attributes)) return fieldValueState(attributes.value ?? "");
+  if (!Object.hasOwn(attributes, "checked")) return { value: "", runtimeDerived: false };
+  return fieldValueState(attributes.value || "on");
+}
+
+function staticFieldName(value) {
+  const name = String(value ?? "").trim();
+  return name && !/\$\{|%\{|<%|<[^>]*>/u.test(name) ? name : "";
 }
 
 function taglibAttributeIsDisabled(tagName, attributes) {
@@ -1036,47 +1112,53 @@ function matchingClosingTag(tags, openingTag) {
   return null;
 }
 
-function selectFieldValue(openingTag, attributes, tags, content) {
+function selectFieldValueState(openingTag, attributes, tags, content) {
   const closing = matchingClosingTag(tags, openingTag);
   const end = closing?.index ?? content.length;
-  const options = tags
-    .filter((tag) => !tag.closing
-      && tag.name === "option"
-      && tag.index > openingTag.index
-      && tag.index < end)
-    .map((tag) => {
+  const optionBoundaries = tags.filter((tag) => (
+    tag.name === "option"
+    && tag.index > openingTag.index
+    && tag.index < end
+  ));
+  const options = optionBoundaries
+    .flatMap((tag, index) => {
+      if (tag.closing) return [];
       const optionAttributes = attributesFrom(sourceForMatch(content, tag));
-      const nextTag = content.indexOf("<", tag.end);
-      const bodyEnd = nextTag === -1 || nextTag > end ? end : nextTag;
-      return {
+      const bodyEnd = optionBoundaries[index + 1]?.index ?? end;
+      const state = Object.hasOwn(optionAttributes, "value")
+        ? fieldValueState(optionAttributes.value)
+        : fieldValueState(content.slice(tag.end, bodyEnd));
+      return [{
         disabled: Object.hasOwn(optionAttributes, "disabled"),
         selected: Object.hasOwn(optionAttributes, "selected"),
-        value: Object.hasOwn(optionAttributes, "value")
-          ? decodeHtmlEntities(optionAttributes.value)
-          : decodeVisibleText(content.slice(tag.end, bodyEnd)),
-      };
+        value: state.runtimeDerived || Object.hasOwn(optionAttributes, "value")
+          ? state.value
+          : decodeVisibleText(state.value),
+        runtimeDerived: state.runtimeDerived,
+      }];
     })
     .filter((option) => !option.disabled);
   const selected = options.filter((option) => option.selected);
   if (Object.hasOwn(attributes, "multiple")) {
-    return selected.length === 1 ? selected[0].value : "";
+    return selected.length === 1
+      ? selected[0]
+      : { value: "", runtimeDerived: selected.some((option) => option.runtimeDerived) };
   }
-  return (selected.at(-1) ?? options[0])?.value ?? "";
+  return selected.at(-1) ?? options[0] ?? { value: "", runtimeDerived: false };
 }
 
-function textareaFieldValue(openingTag, content) {
+function textareaFieldValueState(openingTag, content) {
   const closing = rawClosingTag(content, "textarea", openingTag.end);
-  if (!closing) return "";
+  if (!closing) return { value: "", runtimeDerived: false };
   let value = content.slice(openingTag.end, closing.start).replace(/^\r?\n/u, "");
-  if (/\$\{|%\{|<%/u.test(value)) return "";
   value = value.replace(/\r\n?/gu, "\n");
-  return decodeHtmlEntities(value);
+  return fieldValueState(value);
 }
 
-function nativeFieldValue(openingTag, attributes, tags, content) {
-  if (openingTag.name === "select") return selectFieldValue(openingTag, attributes, tags, content);
-  if (openingTag.name === "textarea") return textareaFieldValue(openingTag, content);
-  return fieldValue(openingTag.name, attributes);
+function nativeFieldValueState(openingTag, attributes, tags, content) {
+  if (openingTag.name === "select") return selectFieldValueState(openingTag, attributes, tags, content);
+  if (openingTag.name === "textarea") return textareaFieldValueState(openingTag, content);
+  return attributeFieldValueState(openingTag.name, attributes);
 }
 
 function disabledFieldsetContexts(tags, content) {
@@ -1124,13 +1206,15 @@ export function parseJsp(content, filePath) {
   const includes = [];
   const scripts = [];
   const fields = [];
+  const unresolvedFields = [];
+  const warnings = [];
   const pageWebPath = webPathForFile(filePath);
   const scanSources = jspScanSources(content);
   const markupStructure = scanSources.structure;
   const tags = scanSources.tags;
   const formRanges = formBodyRanges(tags);
   const disabledFieldsets = disabledFieldsetContexts(tags, content);
-  const textEntries = extractVisibleTextEntries(markupStructure, locator);
+  const textEntries = extractVisibleTextEntries(markupStructure, locator, tags);
   const taglibRequests = extractTaglibRequests(tags, formRanges, content, locator, pageWebPath);
 
   for (const match of tags) {
@@ -1204,20 +1288,32 @@ export function parseJsp(content, filePath) {
     const source = sourceForMatch(content, match);
     const attributes = attributesFrom(source);
     if (!attributes.name) continue;
-    const value = nativeFieldValue(match, attributes, tags, content);
+    const valueState = nativeFieldValueState(match, attributes, tags, content);
+    const value = valueState.value;
     const requestMetadata = requestFieldMetadata(
       match.name,
       attributes,
       value,
       disabledByFieldset(disabledFieldsets, match.index),
     );
-    fields.push({
-      name: attributes.name,
-      value,
+    const fieldContext = {
       ...requestMetadata,
-      evidence: requestEvidence(locator, match, "name", source),
+      runtimeDerivedValue: valueState.runtimeDerived,
       formOwner: Object.hasOwn(attributes, "form") ? attributes.form : undefined,
       offset: match.index,
+    };
+    const name = staticFieldName(attributes.name);
+    if (!name) {
+      const evidence = requestEvidence(locator, match, "name", source);
+      warnings.push(`dynamic JSP field name omitted in ${filePath} at line ${evidence.line}`);
+      if (requestMetadata.submittable) unresolvedFields.push(fieldContext);
+      continue;
+    }
+    fields.push({
+      name,
+      value,
+      ...fieldContext,
+      evidence: requestEvidence(locator, match, "name", source),
     });
   }
   const taglibFieldTags = new Set([
@@ -1229,25 +1325,43 @@ export function parseJsp(content, filePath) {
     if (match.closing || !taglibFieldTags.has(match.name)) continue;
     const source = sourceForMatch(content, match);
     const attributes = attributesFrom(source);
-    const name = attributes.property ?? attributes.name ?? attributes.path ?? "";
-    if (!name) continue;
+    const rawName = attributes.property
+      ?? attributes.name
+      ?? attributes.path
+      ?? (match.name.startsWith("s:") ? attributes.key : undefined)
+      ?? "";
+    if (!rawName) continue;
     const attributeName = attributes.property !== undefined
       ? "property"
-      : attributes.name !== undefined ? "name" : "path";
-    const value = fieldValue(match.name, attributes);
+      : attributes.name !== undefined
+        ? "name"
+        : attributes.path !== undefined ? "path" : "key";
+    const valueState = attributeFieldValueState(match.name, attributes);
+    const value = valueState.value;
     const requestMetadata = requestFieldMetadata(
       match.name,
       attributes,
       value,
       disabledByFieldset(disabledFieldsets, match.index),
     );
+    const fieldContext = {
+      ...requestMetadata,
+      runtimeDerivedValue: valueState.runtimeDerived,
+      formOwner: Object.hasOwn(attributes, "form") ? attributes.form : undefined,
+      offset: match.index,
+    };
+    const name = staticFieldName(rawName);
+    if (!name) {
+      const evidence = requestEvidence(locator, match, attributeName, source);
+      warnings.push(`dynamic JSP field name omitted in ${filePath} at line ${evidence.line}`);
+      if (requestMetadata.submittable) unresolvedFields.push(fieldContext);
+      continue;
+    }
     fields.push({
       name,
       value,
-      ...requestMetadata,
+      ...fieldContext,
       evidence: requestEvidence(locator, match, attributeName, source),
-      formOwner: Object.hasOwn(attributes, "form") ? attributes.form : undefined,
-      offset: match.index,
     });
   }
 
@@ -1263,17 +1377,24 @@ export function parseJsp(content, filePath) {
   }));
 
   const sortedFields = fields.sort((left, right) => left.offset - right.offset);
+  const sortedUnresolvedFields = unresolvedFields.sort((left, right) => left.offset - right.offset);
   const unownedFields = [];
+  const unownedUnresolvedFields = [];
   const fieldsByOwner = new Map();
-  for (const field of sortedFields) {
+  const unresolvedFieldsByOwner = new Map();
+  const partitionByOwner = (field, unowned, byOwner) => {
     if (field.formOwner === undefined) {
-      unownedFields.push(field);
-      continue;
+      unowned.push(field);
+      return;
     }
-    if (!field.formOwner) continue;
-    const owned = fieldsByOwner.get(field.formOwner) ?? [];
+    if (!field.formOwner) return;
+    const owned = byOwner.get(field.formOwner) ?? [];
     owned.push(field);
-    fieldsByOwner.set(field.formOwner, owned);
+    byOwner.set(field.formOwner, owned);
+  };
+  for (const field of sortedFields) partitionByOwner(field, unownedFields, fieldsByOwner);
+  for (const field of sortedUnresolvedFields) {
+    partitionByOwner(field, unownedUnresolvedFields, unresolvedFieldsByOwner);
   }
   const allRequests = [...requests, ...taglibRequests, ...scriptRequests]
     .filter((request) => request.url)
@@ -1292,29 +1413,58 @@ export function parseJsp(content, filePath) {
     )) {
       if (field.submittable) assignedFieldOffsets.add(field.offset);
     }
+    for (const field of fieldsForForm(
+      formRanges.get(formTag.index) ?? null,
+      formId,
+      unownedUnresolvedFields,
+      unresolvedFieldsByOwner,
+      formIdCounts,
+    )) assignedFieldOffsets.add(field.offset);
   }
 
   return {
     formCount: formTags.length,
-    unassignedFieldCount: sortedFields.filter((field) => !assignedFieldOffsets.has(field.offset)).length,
+    unassignedFieldCount: [...sortedFields, ...sortedUnresolvedFields]
+      .filter((field) => !assignedFieldOffsets.has(field.offset)).length,
     visibleText: textEntries.map((entry) => entry.text).join(" "),
     textEntries,
     requests: allRequests
-      .map(({ offset: _offset, formId, formRange, ...request }) => request.kind === "form"
-        ? {
-            ...request,
-            parameters: mergeRequestParameters(
-              request.parameters,
-              parametersForForm(
-                formRange,
-                formId,
-                unownedFields,
-                fieldsByOwner,
-                formIdCounts,
-              ),
-            ),
-          }
-        : request),
+      .map(({ offset: _offset, formId, formRange, ...request }) => {
+        if (request.kind !== "form") return request;
+        const formFields = fieldsForForm(
+          formRange,
+          formId,
+          unownedFields,
+          fieldsByOwner,
+          formIdCounts,
+        );
+        const hasDynamicParameterNames = fieldsForForm(
+          formRange,
+          formId,
+          unownedUnresolvedFields,
+          unresolvedFieldsByOwner,
+          formIdCounts,
+        ).length > 0;
+        const runtimeValueParameterNames = [...new Set(formFields
+          .filter((field) => field.submittable && field.runtimeDerivedValue)
+          .map((field) => field.name))];
+        const parameters = mergeRequestParameters(
+          request.parameters,
+          parametersForForm(formRange, formId, unownedFields, fieldsByOwner, formIdCounts),
+        );
+        for (const name of runtimeValueParameterNames) {
+          if (Object.hasOwn(parameters, name)) parameters[name] = "";
+        }
+        return {
+          ...request,
+          parameters,
+          ...(runtimeValueParameterNames.length > 0 ? { runtimeValueParameterNames } : {}),
+          ...(hasDynamicParameterNames ? {
+            parametersComplete: false,
+            hasDynamicParameterNames: true,
+          } : {}),
+        };
+      }),
     includes: includes.sort((left, right) => left.offset - right.offset).map(({ offset: _offset, ...entry }) => entry),
     scripts: scripts.sort((left, right) => left.offset - right.offset).map(({ offset: _offset, ...entry }) => entry),
     fields: sortedFields.map(({
@@ -1323,7 +1473,9 @@ export function parseJsp(content, filePath) {
       submittable: _submittable,
       requestChoice: _requestChoice,
       requestValue: _requestValue,
+      runtimeDerivedValue: _runtimeDerivedValue,
       ...entry
     }) => entry),
+    warnings,
   };
 }

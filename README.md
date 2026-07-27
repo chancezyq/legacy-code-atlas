@@ -32,7 +32,7 @@ JSP / JavaScript
 
 这些固定命令要求 PowerShell 兼容或 POSIX/Git Bash Shell 语义，并能展开 `$HOME` 和 `$PWD`；仅提供 cmd.exe 的 host 不支持。第一次全量扫描应使用 host 最长可支持的 timeout；如果前台上限仍不足而 host 支持 background execution，就必须在后台启动后等待 `analyze` 完成，不能依赖短的默认 timeout。
 
-> **命名空间说明：** Atlas 的入口现在是 `/atlas`，安装在 `%USERPROFILE%\.agents\skills\atlas`，不再与 Understand-Anything 的 `/understand`（`%USERPROFILE%\.agents\skills\understand`）冲突，两者可以共存。最新版安装器会在有效的旧 v2/v3 ownership manifest 以精确路径和 SHA-256 证明归属时，自动把旧版 Atlas 的 `/understand` Skill 迁移到 `/atlas`。已有 Atlas runtime 或待迁移文件却没有有效 ownership manifest，或者文件已修改、来自第三方或不归 Atlas 所有、`/atlas` namespace 已被占用、相关路径含 reparse point 时，安装器会保留现场并停止，绝不覆盖未知文件；干净的首次安装不需要旧 manifest。
+> **命名空间说明：** Atlas 的入口现在是 `/atlas`，安装在 `%USERPROFILE%\.agents\skills\atlas`，不再与 Understand-Anything 的 `/understand`（`%USERPROFILE%\.agents\skills\understand`）冲突，两者可以共存。最新版安装器会在有效的旧 v2/v3 ownership manifest 以精确路径和 SHA-256 证明归属时，自动把旧版 Atlas 的 `/understand` Skill 迁移到 `/atlas`。如果未被 Atlas manifest 声明的精确 `/understand` namespace 本身是 junction/reparse point，安装器只确认它不在 Atlas 管理范围内，原样保留并跳过，不读取、迁移或删除其 target。已有 Atlas runtime 或疑似旧 Atlas 的普通迁移文件却没有有效 ownership manifest、owned 文件已修改、`/atlas` namespace 已被占用，或者 Atlas 将写入、删除或迁移的路径含 reparse point 时，安装器仍会保留现场并停止；干净的首次安装不需要旧 manifest。
 
 ### 2. 安装到 OpenCode
 
@@ -104,7 +104,7 @@ URL、statement ID、表名和 procedure 名会保留准确的源码标识符，
 - 按 SQL Server procedure 名称反查 iBATIS/Java 调用方、嵌套 procedure 和读写表。
 - 按 SQL Server 表名反查读写位置和上游入口。
 
-结果会附源码文件和行号。配置或源码直接证明的关系可信度较高；启发式关系、动态 URL、反射和缺失源码需要复核。CLI 输出和 index 引用都按不可信数据处理；只有规范的项目相对 POSIX 引用在解析后仍位于当前项目内，并且 host 工具能强制 workspace confinement 时，Skill 才会打开它。不要把低于 `0.95` 的关系直接当成事实。
+结果会附源码文件和行号。配置或源码直接证明的关系可信度较高；启发式关系、动态 URL、反射和缺失源码需要复核。对 Struts outcome edge，`confidence` 只表示配置关系的提取置信度；即使 `confidence=1`，该 result 也可能只是 `configured-candidate`。只有 `classification=code-confirmed` 且存在 `codeEvidence`，才表示当前索引在唯一解析入口方法中发现了同名直接字面量返回的可能性，仍不表示某次请求必然走该分支。CLI 输出和 index 引用都按不可信数据处理；只有规范的项目相对 POSIX 引用在解析后仍位于当前项目内，并且 host 工具能强制 workspace confinement 时，Skill 才会打开它。不要把低于 `0.95` 的关系直接当成事实。
 
 每个候选的组合路径遍历按方向最多展开 `5,000` 个 state，并最多返回 `100` 条路径；需要同时向上游和下游追踪时，每个方向分别计算。达到任一上限会返回带准确截断 warning 的部分结果。这些上限只约束组合路径展开；初始候选搜索仍扫描 index 节点，邻接表构建和排序仍随相关边数量增长。
 
@@ -126,11 +126,11 @@ node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"
 
 ```text
 .legacy-code-atlas/docs/use-cases.md   用例规格（UCS）：按模块分组，含入口、请求方法与参数、输入字段、主流程、结果（forward/redirect）、SQL statement、读写表、每模块数据访问矩阵和 file:line 引用
-.legacy-code-atlas/docs/ui-spec.md     界面规格（UIS）：每个 JSP 页面的可见文本、含默认值的表单字段表、带 HTTP 方法的页面动作和到达方式
+.legacy-code-atlas/docs/ui-spec.md     界面规格（UIS）：每个 JSP 页面的可见文本、表单字段表（只显示已确认的静态默认值）、带 HTTP 方法的页面动作和到达方式
 .legacy-code-atlas/docs/diagrams.md    系统图：Mermaid 页面导航图、带图例的模块总览 flowchart（虚线为启发式关系）和用例时序图，GitHub/GitLab 可直接渲染
 ```
 
-所有内容都从索引事实推导并附项目相对引用，不经过模型改写；主流程置信度低于 `0.95` 时会标注含启发式关系需人工复核（文档正文为英文，便于在英文代码库团队中分享）。文档规模有硬上限（每份 1 MiB、用例/页面各 200 个、图各 30/20 个），超出会显式标注截断。这些文档包含源码结构、路径和 SQL，请与索引一样按公司敏感数据管理，只通过公司批准的渠道分享。
+所有内容都从索引事实推导，不经过模型改写；关系、流程、页面动作和到达方式会附项目相对引用，可见文本与字段表则以对应 JSP 的页面级事实呈现，不会为每一项重复 `file:line`。主流程置信度低于 `0.95` 时会标注含启发式关系需人工复核（文档正文为英文，便于在英文代码库团队中分享）。Struts result 会在 UCS、UIS arrival 和 Mermaid 导航图中明确区分 `code-confirmed` 与 `configured-candidate`，候选关系使用虚线或显式标签，不会因为配置提取置信度为 `1.00` 就显示成代码已返回。文档规模有硬上限（每份 1 MiB、用例/页面各 200 个、图各 30/20 个），超出会显式标注截断。这些文档包含源码结构、路径和 SQL，请与索引一样按公司敏感数据管理，只通过公司批准的渠道分享。
 
 也可以只为一个模块或一个功能生成文档：用普通消息提出（例如“为 order 模块生成文档”“生成订单审核功能的文档”），Skill 会像 trace 一样先运行 `prepare-query`，用 structured `write` 把候选写入 `.legacy-code-atlas/query.txt`，再运行固定命令：
 
@@ -157,7 +157,7 @@ Agent Skill 的位置固定在 `%USERPROFILE%\.agents\skills\atlas\SKILL.md`。�
 
 旧的 `commands\understand.md` Markdown command 已移除；当前 `/atlas` 入口是全局 Agent Skill。有效的 v2/v3 manifest 若以预期路径和 SHA-256 证明 `skills\understand\SKILL.md` 属于旧版 Atlas，安装器会把它纳入迁移事务并发布新的 `skills\atlas\SKILL.md`；这不会迁移 Understand-Anything 或其他第三方的 `/understand` Skill。升级 v1/v2 时，安装器也只会对旧 manifest 以精确路径和 SHA-256 证明归属的 `legacy_atlas.ts` 和旧 command 做一次事务性退休，且不会写入替代 tool。
 
-预检会拒绝 reparse point、被占用的事务路径、未归属或已修改的旧文件，以及外来或已占用的 `/atlas` namespace；已有 runtime 或迁移候选却没有有效 ownership manifest 时也会停止。真正覆盖当前 Atlas Skill 或退休每个旧 Skill、tool、command 前，安装器还会最终复核预期存在状态，并对存在的文件重新校验 SHA-256。匹配的旧文件先移到本次事务的 backup；新 v3 manifest 提交后才清理仍通过存在性和哈希校验的 backup，失败回滚时也只恢复哈希匹配的 backup。旧文件已经缺失时可继续升级；任何无法证明归属的文件都会原样保留，等待人工确认来源。
+预检会保留并跳过未归属的精确 `/understand` namespace junction/reparse point；除此之外，Atlas 将写入、删除或迁移的路径若含 reparse point，或者事务路径被占用、疑似旧 Atlas 的普通文件未归属或已修改、`/atlas` namespace 外来或已占用，安装器都会拒绝继续。已有 runtime 或普通迁移候选却没有有效 ownership manifest 时也会停止。真正覆盖当前 Atlas Skill 或退休每个旧 Skill、tool、command 前，安装器还会最终复核预期存在状态，并对存在的文件重新校验 SHA-256。匹配的旧文件先移到本次事务的 backup；新 v3 manifest 提交后才清理仍通过存在性和哈希校验的 backup，失败回滚时也只恢复哈希匹配的 backup。旧文件已经缺失时可继续升级；任何无法证明归属的文件都会原样保留，等待人工确认来源。
 
 ## 更新和卸载
 
@@ -206,13 +206,13 @@ src/test/**
 
 - SQL Server procedure 支持 `CREATE/ALTER PROCEDURE`、参数、嵌套 `EXEC`、读取/写入表，并可从 iBATIS `<procedure>` 或包含静态 `CALL/EXEC` 的通用 `<statement>` 追踪到 procedure；通用 `<statement>` 中的多条 DML 会合并读写表，不会连接数据库或执行 procedure。
 - Struts 2 支持 package namespace、action、method、result 到 Java 方法和 JSP 页面；Struts 1 仍按 `struts-config.xml` 规则解析。
-- Struts 2 会读取 `struts.action.extension`，因此配置为 `html` 的项目会生成实际的 `.html` route；`redirectAction` 会沿用同一扩展名并生成 `redirects_to` route。
+- Struts 2 会读取 `struts.action.extension`，因此配置为 `html` 的项目会生成实际的 `.html` route；`redirectAction` 会沿用同一扩展名并生成 `redirects_to` route。静态 `action!method` 请求会对齐到唯一配置 route，并把 method 作为 evidence-scoped dispatch hint；多个 method hint 会保持歧义。
 - Struts 2 的 `class` 如果是 Spring bean id，会通过 Spring bean 的 `class` 属性解析到 Java Action；同名 bean 或缺失源码仍会保留 warning。
 - Struts 1 forward 指向 Tiles definition 时会生成 `uses_tile`。
 - Tiles 支持 definition 跨 XML 文件继承、template 和 put 页面关系；动态运行时组合仍需打开原始 JSP/XML 复核。
 - 动态拼接 URL、运行时反射和缺失源码可能产生未解析关系。
 - Java 调用会按当前 Java 文件、类型和方法解析成员字段、局部变量，以及当前类或父类中无参方法的返回类型（例如 `getPetStore().insertOrder(...)`）；同名重载按规范化参数类型签名隔离（旧 facts 没有签名时回退到参数个数）。带参数的工厂调用、限定对象的多段调用链、反射和未声明的动态对象仍需人工复核。
-- JSP 支持原生表单/链接以及常见 Struts 1 `html:*` rewrite/link/form、Struts 2 `s:*` form/link/url 标签；静态 `page`/`href` 和 URL 标签中的 `value` 会建路由，Struts `s:a value` 仅作为显示文本，动态 action、namespace、EL/OGNL 和 JavaScript 拼接 URL 不会建路由，需要打开源码人工复核。
+- JSP 支持原生表单/链接以及常见 Struts 1 `html:*` rewrite/link/form、Struts 2 `s:*` form/link/url 标签；Struts 2 输入控件缺少 `name/property/path` 时会把静态 `key` 作为绑定名。静态 `page`/`href` 和 URL 标签中的 `value` 会建路由，Struts `s:a value` 仅作为显示文本。动态 action、namespace、EL/OGNL 和 JavaScript 拼接 URL 不会建路由；动态字段名会省略并报告 warning，动态字段值不会冒充静态默认值。`fmt:message` 等 taglib 的资源键目前不会单独进入 UIS，相关运行时标签仍需结合 JSP 和资源文件复核。
 
 ## 真实项目验证
 
@@ -223,9 +223,9 @@ src/test/**
 - `LegacyApp/tdpWeb/src/test/resources/net.sourceforge.jtds-schema.sql:451` 定义 `dbo.get_next_sequence`，并写入 `dbo.sequence`。
 - `LegacyApp/tdpWeb/src/main/webapp/WEB-INF/applicationContext-struts.xml` 把 `userAction`、`searchAction`、`printPreviewAction` 绑定到真实 Java Action 类。
 
-冷缓存首次扫描统计为 758 个 Java/JSP/XML/SQL 源文件、84,169 行，生成 7,186 个节点和 8,213 条关系；本机 Node.js v25.9.0 单次测量约 1.06 秒。人工核验的结果包括：`/admin/definitions.html -> DefinitionAction.list -> definitionList.jsp`，以及 `dbo.get_next_sequence -> EventSQL.genReportId -> DocumentEventDaoiBatis.generateReportId -> EventManager/ReportManager -> dbo.sequence`。扫描器没有运行 Java、JSP、SQL、procedure，也没有连接 SQL Server。
+仓库物理 inventory 含 758 个 Java/JSP/XML/SQL 文件、84,169 个换行记录；其中 `build/target` 下 4 个生成文件、69 行按默认规则忽略，实际冷扫描纳入 754 个文件、84,100 行，生成 6,650 个节点和 7,678 条关系。本机 Node.js v25.9.0 单次冷扫描约 1.06 秒；文档生成约 0.32 秒，得到 31 个 use case、37 个页面、4 个模块且没有整体截断。人工核验包括 `/admin/definitions.html -> DefinitionAction.list -> definitionList.jsp`，核心下游链 `DocumentEventDaoiBatis.generateReportId -> EventSQL.genReportId -> dbo.get_next_sequence -> dbo.sequence`，以及 `/uploadFile.html -> FileUploadAction.upload` 的 DMI dispatch hint；原始 `uploadFile!upload` 不会生成重复 route/UCS。`EventManagerImpl.generateReportId` 和 `ReportManagerImpl.generateReportId` 是经接口关系连接的上游调用方。扫描器没有运行 Java、JSP、SQL、procedure，也没有连接 SQL Server。
 
-这次真实样本促成了三项回归：读取 Struts2 action extension、redirect/JSP route 使用实际扩展名，以及通过 Spring bean id 解析 Action 类。剩余 warning 主要是仓库中没有源码的 `ActionSupport`、外部 DWR/CXF servlet、注释里的脚本引用和无 HTTP 方法提示的 servlet，不能据此推断为业务链路缺失。详细过程见 [TheDailyPlan 验证记录](docs/validation-thedailyplan.md)。
+该样本最终保留 8 条 warning：2 条动态 JSP 字段名省略提示、1 个二进制 JavaScript 跳过、没有源码的 `PdfServlet` 和两个 `ActionSupport` 入口，以及外部 DWR/CXF servlet。它们是明确的不确定边界，不能据此推断为业务链路缺失。详细过程见 [TheDailyPlan 验证记录](docs/validation-thedailyplan.md)。
 
 ## 性能基准
 
@@ -239,7 +239,7 @@ npm run benchmark
 
 它生成可重复的 JSP/Java/iBATIS/Struts fixture，分别运行冻结的 `0.1.0` baseline 和当前候选，运行前删除两边的 `.legacy-code-atlas`，并先验证两份 Graph 字节完全一致。默认门槛是候选中位数至少比 baseline 快 `3.00x`；可以用 `ATLAS_BENCH_MIN_SPEEDUP` 做本地诊断，但发布前不要降低门槛。真实公司项目仍需单独记录文件数、源码行数、机器配置和冷/热缓存结果。
 
-本次开发机验证的 baseline 中位数为 `16,081.13 ms`，candidate 中位数为 `946.29 ms`，加速 `16.99x`。
+本次开发机验证的 baseline 中位数为 `16,048.21 ms`，candidate 中位数为 `977.37 ms`，加速 `16.42x`。
 
 `ATLAS_BENCH_FILES=500` 表示 500 组生成 fixture，每组会生成多种源码文件；它用于稳定比较 baseline 和 candidate，不代表已经在 5 万个真实文件或 200 万行公司源码上完成容量验证。
 

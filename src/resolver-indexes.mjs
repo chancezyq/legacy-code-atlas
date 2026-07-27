@@ -21,6 +21,7 @@ function appendOwner(index, javaFile, owner, value) {
 export function buildResolverIndexes(graph, facts) {
   const indexes = {
     typesByFull: new Map(),
+    typesByCanonical: new Map(),
     typesBySimple: new Map(),
     methodsByType: new Map(),
     methodsByName: new Map(),
@@ -47,6 +48,9 @@ export function buildResolverIndexes(graph, facts) {
     for (const typeRecord of javaFile.types) {
       // Preserve the old last-record-wins behavior for duplicate fully qualified IDs.
       indexes.typesByFull.set(typeRecord.fullName, [typeRecord]);
+      if (typeRecord.canonicalName) {
+        indexes.typesByCanonical.set(typeRecord.canonicalName, [typeRecord]);
+      }
       append(indexes.typesBySimple, typeRecord.name, typeRecord);
       indexes.methodsByType.set(typeRecord.node.id, typeRecord.methods);
       const methodsByName = new Map();

@@ -89,6 +89,9 @@ function parseArguments(argv) {
 
 async function writeIndex(graph, outputPath) {
   validateGraphIndex(graph);
+  if (graph.summary.nodes === 0) {
+    throw new Error("未生成任何可分析节点，请确认项目目录包含受支持的源码文件且当前用户可以读取");
+  }
   const serialized = serializeGraph(graph);
   const serializedBytes = Buffer.byteLength(serialized);
   if (serializedBytes > MAX_GRAPH_INDEX_BYTES) {
@@ -139,7 +142,11 @@ async function readGraphIndex(indexPath) {
   } catch {
     throw new Error("项目索引必须是有效的 UTF-8");
   }
-  return parseAndValidateGraphIndex(text);
+  const graph = parseAndValidateGraphIndex(text);
+  if (graph.summary.nodes === 0) {
+    throw new Error("未生成任何可分析节点，请确认项目目录包含受支持的源码文件且当前用户可以读取");
+  }
+  return graph;
 }
 
 async function loadProjectCache(cachePath) {

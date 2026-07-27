@@ -29,7 +29,7 @@ test("materializer sorts per-file records before graph mutation and resolution",
       [
         "package com.acme;",
         "public class OrderAction {",
-        "  public void execute() {}",
+        "  public ActionForward execute(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return null; }",
         "}",
         "",
       ].join("\n"),
@@ -60,7 +60,7 @@ test("materializer sorts per-file records before graph mutation and resolution",
   assert.equal(serializeGraph(reversed), serializeGraph(forward));
   assert.ok(edge(forward, "page:web/order.jsp", "submits_to", "route:/order.do"));
   assert.ok(edge(forward, "route:/order.do", "maps_to", "java_type:com.acme.OrderAction"));
-  assert.ok(edge(forward, "route:/order.do", "dispatches_to", "java_method:com.acme.OrderAction#execute/0"));
+  assert.ok(edge(forward, "route:/order.do", "dispatches_to", "java_method:com.acme.OrderAction#execute/4"));
   assert.ok(edge(forward, "route:/order.do", "forwards_to", "page:web/order.jsp"));
   assert.deepEqual(forward.warnings.filter((warning) => warning.startsWith("skipped ")), [
     "skipped binary-file: Binary.java",
@@ -404,6 +404,149 @@ test("materializer resolves calls through method-local Java variables", () => {
   assert.equal(graph.edges.some((candidate) => candidate.type === "calls" && candidate.target === "java_method:com.acme.OtherService#audit/0"), false);
 });
 
+test("materializer resolves calls through imported and same-package canonical member types", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/Container.java", "java", [
+        "package com.acme;",
+        "public class Container {",
+        "  public static class Service {",
+        "    public void work() {}",
+        "  }",
+        "  private Service service;",
+        "  public void run() { service.work(); }",
+        "  public static class Client {",
+        "    private Service service;",
+        "    public void run() { service.work(); }",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/OtherService.java", "java", [
+        "package com.acme;",
+        "public class OtherService {",
+        "  public void work() {}",
+        "}",
+      ].join("\n")),
+      record("src/caller/ImportedCaller.java", "java", [
+        "package caller;",
+        "import com.acme.Container.Service;",
+        "public class ImportedCaller {",
+        "  private Service service;",
+        "  public void run() { service.work(); }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/QualifiedCaller.java", "java", [
+        "package com.acme;",
+        "public class QualifiedCaller {",
+        "  private Container.Service service;",
+        "  public void run() { service.work(); }",
+        "}",
+      ].join("\n")),
+      record("src/caller/WildcardCaller.java", "java", [
+        "package caller;",
+        "import com.acme.Container.*;",
+        "public class WildcardCaller {",
+        "  private Service service;",
+        "  public void run() { service.work(); }",
+        "}",
+      ].join("\n")),
+    ],
+  });
+
+  assert.ok(edge(
+    graph,
+    "java_method:caller.ImportedCaller#run/0",
+    "calls",
+    "java_method:com.acme.Container$Service#work/0",
+  ));
+  assert.ok(edge(
+    graph,
+    "java_method:com.acme.QualifiedCaller#run/0",
+    "calls",
+    "java_method:com.acme.Container$Service#work/0",
+  ));
+  assert.ok(edge(
+    graph,
+    "java_method:com.acme.Container#run/0",
+    "calls",
+    "java_method:com.acme.Container$Service#work/0",
+  ));
+  assert.ok(edge(
+    graph,
+    "java_method:com.acme.Container$Client#run/0",
+    "calls",
+    "java_method:com.acme.Container$Service#work/0",
+  ));
+  assert.ok(edge(
+    graph,
+    "java_method:caller.WildcardCaller#run/0",
+    "calls",
+    "java_method:com.acme.Container$Service#work/0",
+  ));
+  assert.equal(graph.edges.some((candidate) => candidate.type === "calls"
+    && candidate.target === "java_method:com.acme.OtherService#work/0"), false);
+});
+
+test("materializer resolves calls through inherited superclass and interface member types", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/Base.java", "java", [
+        "package com.acme;",
+        "public class Base {",
+        "  public static class Service {",
+        "    public void work() {}",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/Child.java", "java", [
+        "package com.acme;",
+        "public class Child extends Base {",
+        "  private Service service;",
+        "  public void run() { service.work(); }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/Contract.java", "java", [
+        "package com.acme;",
+        "public interface Contract {",
+        "  class Service {",
+        "    public void work() {}",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/Implementation.java", "java", [
+        "package com.acme;",
+        "public class Implementation implements Contract {",
+        "  private Service service;",
+        "  public void run() { service.work(); }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/OtherService.java", "java", [
+        "package com.acme;",
+        "public class OtherService {",
+        "  public void work() {}",
+        "}",
+      ].join("\n")),
+    ],
+  });
+
+  assert.ok(edge(
+    graph,
+    "java_method:com.acme.Child#run/0",
+    "calls",
+    "java_method:com.acme.Base$Service#work/0",
+  ));
+  assert.ok(edge(
+    graph,
+    "java_method:com.acme.Implementation#run/0",
+    "calls",
+    "java_method:com.acme.Contract$Service#work/0",
+  ));
+  assert.equal(graph.edges.some((candidate) => candidate.type === "calls"
+    && candidate.target === "java_method:com.acme.OtherService#work/0"), false);
+});
+
 test("materializer resolves calls through inherited no-argument method return types", () => {
   const graph = materializeRecords({
     projectRoot,
@@ -521,14 +664,14 @@ test("materializer links Struts JSP taglib forms to DispatchAction methods", () 
       record("src/com/acme/OrderAction.java", "java", [
         "package com.acme;",
         "public class OrderAction extends DispatchAction {",
-        "  public void audit() {}",
+        "  public ActionForward audit(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return null; }",
         "}",
       ].join("\n")),
     ],
   });
 
   assert.ok(edge(graph, "page:web/order/edit.jsp", "submits_to", "route:/order/audit.do"));
-  assert.ok(edge(graph, "route:/order/audit.do", "dispatches_to", "java_method:com.acme.OrderAction#audit/0"));
+  assert.ok(edge(graph, "route:/order/audit.do", "dispatches_to", "java_method:com.acme.OrderAction#audit/4"));
 });
 
 test("static link query parameters select Struts DispatchAction methods", () => {
@@ -544,7 +687,7 @@ test("static link query parameters select Struts DispatchAction methods", () => 
       record("src/com/acme/OrderAction.java", "java", [
         "package com.acme;",
         "public class OrderAction extends DispatchAction {",
-        "  public void delete() {}",
+        "  public ActionForward delete(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return null; }",
         "}",
       ].join("\n")),
     ],
@@ -552,7 +695,7 @@ test("static link query parameters select Struts DispatchAction methods", () => 
   const route = graph.nodes.find((node) => node.id === "route:/order.do");
 
   assert.deepEqual(route.data.requestHints[0].parameters, { method: "delete", id: "7" });
-  assert.ok(edge(graph, "route:/order.do", "dispatches_to", "java_method:com.acme.OrderAction#delete/0"));
+  assert.ok(edge(graph, "route:/order.do", "dispatches_to", "java_method:com.acme.OrderAction#delete/4"));
 });
 
 test("materializer preserves every form observation when one page submits to one route", () => {
@@ -627,6 +770,104 @@ test("materializer keeps legacy single-form bytes while retaining empty paramete
 
   assert.deepEqual(known.data.requestHints[0].parameters, { known: "" });
   assert.equal(known.data.requestHints[0].parametersComplete, true);
+});
+
+test("materializer retains a static parameter name when its JSP default is runtime-derived", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record(
+      "web/order.jsp",
+      "jsp",
+      '<form action="/order.do"><input name="orderId" value="${order.id}"></form>',
+      "markup",
+    )],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/order.do");
+  const model = buildDocumentModel(graph);
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { orderId: "" });
+  assert.deepEqual(model.useCases[0].request.parameters, ["orderId"]);
+});
+
+test("materializer retains a select parameter when its selected option body is runtime-derived", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record(
+      "web/order.jsp",
+      "jsp",
+      '<form action="/order.do"><select name="status"><option selected><c:out value="${status}"/></option></select></form>',
+      "markup",
+    )],
+  });
+  const route = graph.nodes.find((node) => node.id === "route:/order.do");
+  const model = buildDocumentModel(graph);
+
+  assert.deepEqual(route.data.requestHints[0].parameters, { status: "" });
+  assert.deepEqual(model.useCases[0].request.parameters, ["status"]);
+});
+
+test("materializer never publishes a sibling static value for a runtime-derived parameter", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/repeated.jsp", "jsp", [
+      '<form action="/text.do">',
+      '  <input name="mode" value="${runtimeMode}">',
+      '  <input name="mode" value="fixed">',
+      '</form>',
+      '<form action="/choice.do">',
+      '  <input type="checkbox" checked name="flag" value="%{runtimeFlag}">',
+      '  <input type="checkbox" checked name="flag" value="fixed">',
+      '</form>',
+    ].join("\n"), "markup")],
+  });
+  const textRoute = graph.nodes.find((node) => node.id === "route:/text.do");
+  const choiceRoute = graph.nodes.find((node) => node.id === "route:/choice.do");
+
+  assert.deepEqual(textRoute.data.requestHints[0].parameters, { mode: "" });
+  assert.deepEqual(choiceRoute.data.requestHints[0].parameters, { flag: "" });
+  assert.doesNotMatch(JSON.stringify(graph), /runtimeValueParameterNames|runtimeMode|runtimeFlag/u);
+});
+
+test("materializer keeps dynamic field-name uncertainty scoped to its owning form", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/dynamic-fields.jsp", "jsp", [
+      '<form action="/dynamic.do"><input name="${runtimeName}"></form>',
+      '<form action="/known.do"><input name="known"></form>',
+    ].join("\n"), "markup")],
+  });
+  const dynamicRoute = graph.nodes.find((node) => node.id === "route:/dynamic.do");
+  const knownRoute = graph.nodes.find((node) => node.id === "route:/known.do");
+  const model = buildDocumentModel(graph);
+  const dynamicUseCase = model.useCases.find(({ route }) => route === "/dynamic.do");
+  const knownUseCase = model.useCases.find(({ route }) => route === "/known.do");
+
+  assert.deepEqual(dynamicRoute.data.requestHints[0].parameters, {});
+  assert.equal(dynamicRoute.data.requestHints[0].parametersComplete, false);
+  assert.equal(dynamicRoute.data.requestHints[0].hasDynamicParameterNames, true);
+  assert.equal(knownRoute.data.requestHints[0].parametersComplete, true);
+  assert.equal(Object.hasOwn(knownRoute.data.requestHints[0], "hasDynamicParameterNames"), false);
+  assert.equal(dynamicUseCase.request.hasDynamicParameterNames, true);
+  assert.deepEqual(dynamicUseCase.inputs, []);
+  assert.deepEqual(knownUseCase.inputs, ["known"]);
+});
+
+test("materializer keeps dynamic query-name uncertainty on its owning form", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/query-fields.jsp", "jsp", [
+      '<form action="/dynamic.do?${runtimeName}=x&fixed=1"></form>',
+      '<form action="/known.do?mode=list"></form>',
+    ].join("\n"), "markup")],
+  });
+  const dynamicRoute = graph.nodes.find((node) => node.id === "route:/dynamic.do");
+  const knownRoute = graph.nodes.find((node) => node.id === "route:/known.do");
+
+  assert.deepEqual(dynamicRoute.data.requestHints[0].parameters, { fixed: "1" });
+  assert.equal(dynamicRoute.data.requestHints[0].parametersComplete, false);
+  assert.equal(dynamicRoute.data.requestHints[0].hasDynamicParameterNames, true);
+  assert.equal(knownRoute.data.requestHints[0].parametersComplete, true);
+  assert.equal(Object.hasOwn(knownRoute.data.requestHints[0], "hasDynamicParameterNames"), false);
 });
 
 test("materializer preserves explicit query parameter names with dynamic values", () => {
@@ -859,6 +1100,710 @@ test("materializer resolves Struts 2 action methods and result pages", () => {
   assert.ok(edge(graph, "route:/order/save.action", "forwards_to", "page:web/order/success.jsp"));
 });
 
+test("materializer distinguishes code-returned outcomes from configured candidates", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/OrderAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class OrderAction {",
+          "  public ActionForward execute(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) {",
+          "    return mapping.findForward(\"success\");",
+          "  }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts-config.xml",
+        "xml",
+        [
+          "<struts-config><action-mappings>",
+          "  <action path='/order/save' type='com.acme.OrderAction'>",
+          "    <forward name='success' path='/order/success.jsp'/>",
+          "    <forward name='error' path='/order/error.jsp'/>",
+          "  </action>",
+          "</action-mappings></struts-config>",
+        ].join("\n"),
+        "config",
+      ),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/error.jsp", "jsp", "<p>Error</p>", "markup"),
+    ],
+  });
+
+  const confirmed = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+  const candidate = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/error.jsp",
+  );
+
+  assert.deepEqual(confirmed.data.outcome, {
+    framework: "struts1",
+    name: "success",
+    classification: "code-confirmed",
+    codeEvidence: [{
+      file: "src/com/acme/OrderAction.java",
+      line: 4,
+      column: 5,
+      snippet: 'return mapping.findForward("success");',
+    }],
+  });
+  assert.deepEqual(candidate.data.outcome, {
+    framework: "struts1",
+    name: "error",
+    classification: "configured-candidate",
+    codeEvidence: [],
+  });
+  assert.equal(confirmed.confidence, 1, "edge confidence describes exact configuration extraction");
+  assert.equal(candidate.confidence, 1, "candidate modality must not overload extraction confidence");
+});
+
+test("an unnamed Struts result cannot become code-confirmed", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction {",
+        '  public ActionForward execute(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return mapping.findForward(""); }',
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+  assert.deepEqual(outcome.data.outcome, {
+    framework: "struts1",
+    name: "",
+    classification: "configured-candidate",
+    codeEvidence: [],
+  });
+});
+
+test("Struts 2 literal returns confirm only the matching configured result", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/ReviewAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class ReviewAction {",
+          "  public String save() { return \"success\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/review'>",
+          "  <action name='save' class='com.acme.ReviewAction' method='save'>",
+          "    <result name='success'>/review/success.jsp</result>",
+          "    <result name='input'>/review/input.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record("web/review/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/review/input.jsp", "jsp", "<p>Input</p>", "markup"),
+    ],
+  });
+
+  assert.equal(
+    edge(graph, "route:/review/save.action", "forwards_to", "page:web/review/success.jsp")
+      .data.outcome.classification,
+    "code-confirmed",
+  );
+  assert.equal(
+    edge(graph, "route:/review/save.action", "forwards_to", "page:web/review/input.jsp")
+      .data.outcome.classification,
+    "configured-candidate",
+  );
+});
+
+test("a Spring controller sharing a route cannot confirm an unresolved Struts outcome", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/OtherController.java", "java", [
+        "package com.acme;",
+        "public class OtherController {",
+        '  public String handleRequest() { return "success"; }',
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts.xml", "xml", [
+        "<struts><package namespace='/order'>",
+        "  <action name='save' class='com.acme.MissingAction'>",
+        "    <result name='success'>/order/success.jsp</result>",
+        "  </action>",
+        "</package></struts>",
+      ].join("\n"), "config"),
+      record("WEB-INF/applicationContext.xml", "xml", [
+        "<beans>",
+        "  <bean id='otherController' class='com.acme.OtherController'/>",
+        "  <bean class='org.springframework.web.servlet.handler.SimpleUrlHandlerMapping'>",
+        "    <property name='mappings'><props>",
+        "      <prop key='/order/save.action'>otherController</prop>",
+        "    </props></property>",
+        "  </bean>",
+        "</beans>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+
+  assert.ok(edge(
+    graph,
+    "route:/order/save.action",
+    "dispatches_to",
+    "java_method:com.acme.OtherController#handleRequest/0",
+  ));
+  const outcome = edge(
+    graph,
+    "route:/order/save.action",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+  assert.deepEqual(outcome.data.outcome, {
+    framework: "struts2",
+    name: "success",
+    classification: "configured-candidate",
+    codeEvidence: [],
+  });
+});
+
+test("an anonymous-class return cannot confirm its enclosing Struts action outcome", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction {",
+        "  public ActionForward execute(ActionMapping mapping, ActionForm form,",
+        "      HttpServletRequest request, HttpServletResponse response) {",
+        '    Callback callback = new Callback() { public ActionForward execute(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) { return mapping.findForward("success"); } };',
+        "    return fallback;",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+  assert.deepEqual(outcome.data.outcome.codeEvidence, []);
+});
+
+test("a nonstandard Struts 1 method signature cannot confirm an action outcome", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction {",
+        '  public ActionForward execute(ActionMapping mapping) { return mapping.findForward("success"); }',
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(
+    graph.edges.some((candidate) => candidate.source === "route:/order/save.do"
+      && candidate.type === "dispatches_to"),
+    false,
+  );
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+  assert.deepEqual(outcome.data.outcome.codeEvidence, []);
+});
+
+test("a local class cannot satisfy a top-level Struts action mapping", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/Container.java", "java", [
+        "package com.acme;",
+        "public class Container {",
+        "  public void install() {",
+        "    class OrderAction {",
+        "      public ActionForward execute(ActionMapping mapping, ActionForm form,",
+        "          HttpServletRequest request, HttpServletResponse response) {",
+        '        return mapping.findForward("success");',
+        "      }",
+        "    }",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(
+    graph.edges.some((candidate) => candidate.source === "route:/order/save.do"
+      && candidate.type === "maps_to"),
+    false,
+  );
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+});
+
+test("a fully qualified Struts target cannot fall back to another package", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/other/OrderAction.java", "java", [
+        "package other;",
+        "public class OrderAction {",
+        "  public ActionForward execute(ActionMapping mapping, ActionForm form,",
+        "      HttpServletRequest request, HttpServletResponse response) {",
+        '    return mapping.findForward("success");',
+        "  }",
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(
+    graph.edges.some((candidate) => candidate.source === "route:/order/save.do"
+      && candidate.type === "maps_to"),
+    false,
+  );
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+  assert.deepEqual(outcome.data.outcome.codeEvidence, []);
+});
+
+test("an exact public static member class can satisfy a Struts action mapping", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/Container.java", "java", [
+        "package com.acme;",
+        "public class Container {",
+        "  public static",
+        "  class OrderAction {",
+        "    public ActionForward execute(ActionMapping mapping, ActionForm form,",
+        "        HttpServletRequest request, HttpServletResponse response) {",
+        '      return mapping.findForward("success");',
+        "    }",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.Container$OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.ok(edge(
+    graph,
+    "route:/order/save.do",
+    "maps_to",
+    "java_type:com.acme.Container$OrderAction",
+  ));
+  assert.ok(edge(
+    graph,
+    "route:/order/save.do",
+    "dispatches_to",
+    "java_method:com.acme.Container$OrderAction#execute/4",
+  ));
+  assert.equal(outcome.data.outcome.classification, "code-confirmed");
+});
+
+test("annotation text cannot make a non-static member class a Struts action", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/Container.java", "java", [
+        "package com.acme;",
+        "public class Container {",
+        '  @SuppressWarnings("static") public class OrderAction {',
+        "    public ActionForward execute(ActionMapping mapping, ActionForm form,",
+        "        HttpServletRequest request, HttpServletResponse response) {",
+        '      return mapping.findForward("success");',
+        "    }",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.Container$OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(
+    graph.edges.some((candidate) => candidate.source === "route:/order/save.do"
+      && candidate.type === "maps_to"),
+    false,
+  );
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+});
+
+test("a local class cannot satisfy an inherited Struts entry lookup", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/Container.java", "java", [
+        "package com.acme;",
+        "public class Container {",
+        "  public void install() {",
+        "    class BaseAction {",
+        "      public ActionForward execute(ActionMapping mapping, ActionForm form,",
+        "          HttpServletRequest request, HttpServletResponse response) {",
+        '        return mapping.findForward("success");',
+        "      }",
+        "    }",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction extends BaseAction {}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(
+    graph.edges.some((candidate) => candidate.source === "route:/order/save.do"
+      && candidate.type === "dispatches_to"),
+    false,
+  );
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+});
+
+test("duplicate Java method records cannot code-confirm a Struts outcome", () => {
+  const signature = "ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response";
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/a/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction {",
+        `  public ActionForward execute(${signature}) { return fallback; }`,
+        "}",
+      ].join("\n")),
+      record("src/z/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction {",
+        `  public ActionForward execute(${signature}) { return mapping.findForward("success"); }`,
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/order/save.do",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+  assert.deepEqual(outcome.data.outcome.codeEvidence, []);
+});
+
+test("a parameterized Struts 2 method cannot confirm an action outcome", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/ReviewAction.java", "java", [
+        "package com.acme;",
+        "public class ReviewAction {",
+        '  public String save(String input) { return "success"; }',
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts.xml", "xml", [
+        "<struts><package namespace='/review'>",
+        "  <action name='save' class='com.acme.ReviewAction' method='save'>",
+        "    <result name='success'>/review/success.jsp</result>",
+        "  </action>",
+        "</package></struts>",
+      ].join("\n"), "config"),
+      record("web/review/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+    ],
+  });
+  const outcome = edge(
+    graph,
+    "route:/review/save.action",
+    "forwards_to",
+    "page:web/review/success.jsp",
+  );
+
+  assert.equal(
+    graph.edges.some((candidate) => candidate.source === "route:/review/save.action"
+      && candidate.type === "dispatches_to"),
+    false,
+  );
+  assert.equal(outcome.data.outcome.classification, "configured-candidate");
+  assert.deepEqual(outcome.data.outcome.codeEvidence, []);
+});
+
+test("non-public Struts entry methods do not dispatch or code-confirm outcomes", () => {
+  const cases = [
+    {
+      label: "Struts 1 private execute",
+      routeId: "route:/private/save.do",
+      pageId: "page:web/private/success.jsp",
+      records: [
+        record("src/com/acme/PrivateAction.java", "java", [
+          "package com.acme;",
+          "public class PrivateAction {",
+          "  private ActionForward execute(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) {",
+          '    return mapping.findForward("success");',
+          "  }",
+          "}",
+        ].join("\n")),
+        record("WEB-INF/struts-config.xml", "xml", [
+          "<struts-config><action-mappings>",
+          "  <action path='/private/save' type='com.acme.PrivateAction'>",
+          "    <forward name='success' path='/private/success.jsp'/>",
+          "  </action>",
+          "</action-mappings></struts-config>",
+        ].join("\n"), "config"),
+        record("web/private/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      ],
+    },
+    {
+      label: "Struts 2 protected method",
+      routeId: "route:/protected/save.action",
+      pageId: "page:web/protected/success.jsp",
+      records: [
+        record("src/com/acme/ProtectedAction.java", "java", [
+          "package com.acme;",
+          "public class ProtectedAction {",
+          '  protected String save() { return "success"; }',
+          "}",
+        ].join("\n")),
+        record("WEB-INF/struts.xml", "xml", [
+          "<struts><package namespace='/protected'>",
+          "  <action name='save' class='com.acme.ProtectedAction' method='save'>",
+          "    <result name='success'>/protected/success.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"), "config"),
+        record("web/protected/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      ],
+    },
+  ];
+
+  for (const scenario of cases) {
+    const graph = materializeRecords({ projectRoot, records: scenario.records });
+    assert.equal(
+      graph.edges.some((candidate) => candidate.source === scenario.routeId
+        && candidate.type === "dispatches_to"),
+      false,
+      scenario.label,
+    );
+    const outcome = edge(graph, scenario.routeId, "forwards_to", scenario.pageId);
+    assert.equal(outcome.data.outcome.classification, "configured-candidate", scenario.label);
+    assert.deepEqual(outcome.data.outcome.codeEvidence, [], scenario.label);
+  }
+});
+
+test("multiple Struts targets sharing one route keep their outcomes as candidates", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("src/com/acme/FirstAction.java", "java", [
+        "package com.acme;",
+        "public class FirstAction {",
+        '  public String save() { return "success"; }',
+        "}",
+      ].join("\n")),
+      record("src/com/acme/SecondAction.java", "java", [
+        "package com.acme;",
+        "public class SecondAction {",
+        '  public String save() { return "success"; }',
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts.xml", "xml", [
+        "<struts><package namespace='/order'>",
+        "  <action name='save' class='com.acme.FirstAction' method='save'>",
+        "    <result name='success'>/order/first.jsp</result>",
+        "  </action>",
+        "  <action name='save' class='com.acme.SecondAction' method='save'>",
+        "    <result name='success'>/order/second.jsp</result>",
+        "  </action>",
+        "</package></struts>",
+      ].join("\n"), "config"),
+      record("web/order/first.jsp", "jsp", "<p>First</p>", "markup"),
+      record("web/order/second.jsp", "jsp", "<p>Second</p>", "markup"),
+    ],
+  });
+
+  const outcomes = graph.edges
+    .filter((candidate) => candidate.source === "route:/order/save.action"
+      && candidate.type === "forwards_to")
+    .map((candidate) => candidate.data.outcome);
+  assert.equal(outcomes.length, 2);
+  assert.deepEqual(
+    outcomes.map(({ classification }) => classification),
+    ["configured-candidate", "configured-candidate"],
+  );
+  assert.ok(outcomes.every(({ codeEvidence }) => codeEvidence.length === 0));
+});
+
+test("multiple resolved dispatch methods keep every configured outcome as a candidate", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record("web/order/edit.jsp", "jsp", [
+        '<html:form action="/order/save" method="post">',
+        '  <html:hidden property="method" value="save" />',
+        "</html:form>",
+        '<html:form action="/order/save" method="post">',
+        '  <html:hidden property="method" value="cancel" />',
+        "</html:form>",
+      ].join("\n"), "markup"),
+      record("src/com/acme/OrderAction.java", "java", [
+        "package com.acme;",
+        "public class OrderAction extends DispatchAction {",
+        "  public ActionForward save(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) {",
+        "    return mapping.findForward(\"success\");",
+        "  }",
+        "  public ActionForward cancel(ActionMapping mapping, ActionForm form, HttpServletRequest request, HttpServletResponse response) {",
+        "    return mapping.findForward(\"cancelled\");",
+        "  }",
+        "}",
+      ].join("\n")),
+      record("WEB-INF/struts-config.xml", "xml", [
+        "<struts-config><action-mappings>",
+        "  <action path='/order/save' type='com.acme.OrderAction' parameter='method'>",
+        "    <forward name='success' path='/order/success.jsp'/>",
+        "    <forward name='cancelled' path='/order/cancelled.jsp'/>",
+        "  </action>",
+        "</action-mappings></struts-config>",
+      ].join("\n"), "config"),
+    ],
+  });
+
+  const classifications = graph.edges
+    .filter((candidate) => candidate.source === "route:/order/save.do"
+      && candidate.type === "forwards_to")
+    .map((candidate) => candidate.data.outcome.classification);
+  assert.deepEqual(classifications, ["configured-candidate", "configured-candidate"]);
+});
+
 test("Struts 2 routes honor the configured action extension", () => {
   const graph = materializeRecords({
     projectRoot,
@@ -890,6 +1835,7 @@ test("Struts 2 default execute dispatch remains heuristic", () => {
         "package com.acme;",
         "public class OrderAction {",
         "  public String execute() { return \"success\"; }",
+        "  public String perform() { return \"unrelated\"; }",
         "}",
       ].join("\n")),
       record("WEB-INF/struts.xml", "xml", "<struts><package namespace='/order'><action name='save' class='com.acme.OrderAction'/></package></struts>", "config"),
@@ -898,6 +1844,10 @@ test("Struts 2 default execute dispatch remains heuristic", () => {
   const dispatch = edge(graph, "route:/order/save.action", "dispatches_to", "java_method:com.acme.OrderAction#execute/0");
   assert.ok(dispatch);
   assert.equal(dispatch.confidence, 0.9);
+  assert.equal(
+    edge(graph, "route:/order/save.action", "dispatches_to", "java_method:com.acme.OrderAction#perform/0"),
+    undefined,
+  );
 });
 
 test("materializer links Tiles definitions to templates, put pages, and inheritance", () => {
@@ -997,6 +1947,474 @@ test("JSP Struts 2 tags resolve unique namespaced actions with configured extens
   assert.equal(graph.nodes.some((node) => node.id === "route:/saveDefinition.action"), false);
 });
 
+test("Struts 2 tags disambiguate duplicate action names only with an explicit namespace", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts>",
+          "  <constant name='struts.action.extension' value='html'/>",
+          "  <package namespace='/admin'><action name='save' class='com.acme.AdminSaveAction'/></package>",
+          "  <package namespace='/order'><action name='save' class='com.acme.OrderSaveAction'/></package>",
+          "</struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/WEB-INF/pages/edit.jsp",
+        "jsp",
+        [
+          "<s:form action='save' namespace='/admin' method='post'></s:form>",
+          "<s:form action='save' namespace='/order' method='post'></s:form>",
+          "<s:form action='save' method='post'></s:form>",
+        ].join("\n"),
+        "markup",
+      ),
+    ],
+  });
+
+  const page = "page:web/WEB-INF/pages/edit.jsp";
+  assert.ok(edge(graph, page, "submits_to", "route:/admin/save.html"));
+  assert.ok(edge(graph, page, "submits_to", "route:/order/save.html"));
+  assert.ok(edge(graph, page, "submits_to", "route:/save.action"));
+  assert.equal(edge(graph, page, "submits_to", "route:/admin/save.action"), undefined);
+  assert.equal(edge(graph, page, "submits_to", "route:/order/save.action"), undefined);
+});
+
+test("relative native forms reconcile to one uniquely configured Struts 2 action", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts>",
+          "  <constant name='struts.action.extension' value='html'/>",
+          "  <package namespace='/'>",
+          "    <action name='search' class='com.acme.SearchAction'><result>/WEB-INF/pages/search.jsp</result></action>",
+          "    <action name='printPreviewDisplay' class='com.acme.PrintPreviewAction'/>",
+          "  </package>",
+          "  <package namespace='/admin'>",
+          "    <action name='openSearch' class='com.acme.SearchAction'><result>/WEB-INF/pages/search.jsp</result></action>",
+          "  </package>",
+          "</struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/WEB-INF/pages/search.jsp",
+        "jsp",
+        '<form action="printPreviewDisplay.html" method="post"><input name="patientId"></form>',
+        "markup",
+      ),
+    ],
+  });
+
+  assert.ok(edge(
+    graph,
+    "page:web/WEB-INF/pages/search.jsp",
+    "submits_to",
+    "route:/printPreviewDisplay.html",
+  ));
+  assert.equal(
+    graph.nodes.some((node) => node.id === "route:/admin/printPreviewDisplay.html"),
+    false,
+  );
+});
+
+test("Struts 2 dynamic method requests align to the configured route and dispatch method", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/SaveAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class SaveAction {",
+          "  public String execute() { return \"success\"; }",
+          "  public String approve() { return \"approved\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/order'>",
+          "  <action name='save' class='com.acme.SaveAction'>",
+          "    <result name='success'>/order/success.jsp</result>",
+          "    <result name='approved'>/order/approved.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        '<form action="/order/save!approve.action" method="post"></form>',
+        "markup",
+      ),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/approved.jsp", "jsp", "<p>Approved</p>", "markup"),
+    ],
+  });
+
+  const routeId = "route:/order/save.action";
+  assert.ok(edge(graph, "page:web/order/edit.jsp", "submits_to", routeId));
+  assert.equal(graph.nodes.some((node) => node.id === "route:/order/save!approve.action"), false);
+  assert.ok(edge(graph, routeId, "dispatches_to", "java_method:com.acme.SaveAction#approve/0"));
+  assert.equal(edge(graph, routeId, "dispatches_to", "java_method:com.acme.SaveAction#execute/0"), undefined);
+
+  const route = graph.nodes.find((node) => node.id === routeId);
+  assert.deepEqual(route.data.requestHints.map(({ dispatchMethod }) => dispatchMethod), ["approve"]);
+  const outcomes = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "forwards_to")
+    .map((candidate) => [candidate.data.outcome.name, candidate.data.outcome.classification]);
+  assert.deepEqual(outcomes, [
+    ["approved", "code-confirmed"],
+    ["success", "configured-candidate"],
+  ]);
+});
+
+test("Struts 2 dynamic methods override an explicitly configured action method", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/SaveAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class SaveAction {",
+          "  public String save() { return \"saved\"; }",
+          "  public String approve() { return \"approved\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/order'>",
+          "  <action name='save' class='com.acme.SaveAction' method='save'>",
+          "    <result name='saved'>/order/saved.jsp</result>",
+          "    <result name='approved'>/order/approved.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        '<form action="/order/save!approve.action" method="post"></form>',
+        "markup",
+      ),
+      record("web/order/saved.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/approved.jsp", "jsp", "<p>Approved</p>", "markup"),
+    ],
+  });
+
+  const routeId = "route:/order/save.action";
+  assert.ok(edge(graph, routeId, "dispatches_to", "java_method:com.acme.SaveAction#approve/0"));
+  assert.equal(edge(graph, routeId, "dispatches_to", "java_method:com.acme.SaveAction#save/0"), undefined);
+  const outcomes = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "forwards_to")
+    .map((candidate) => [candidate.data.outcome.name, candidate.data.outcome.classification]);
+  assert.deepEqual(outcomes, [
+    ["approved", "code-confirmed"],
+    ["saved", "configured-candidate"],
+  ]);
+});
+
+test("ordinary and dynamic Struts 2 requests retain configured and request-specific methods", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/SaveAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class SaveAction {",
+          "  public String save() { return \"saved\"; }",
+          "  public String approve() { return \"approved\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/order'>",
+          "  <action name='save' class='com.acme.SaveAction' method='save'>",
+          "    <result name='saved'>/order/saved.jsp</result>",
+          "    <result name='approved'>/order/approved.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        [
+          '<form action="/order/save.action" method="post"></form>',
+          '<form action="/order/save!approve.action" method="post"></form>',
+        ].join("\n"),
+        "markup",
+      ),
+      record("web/order/saved.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/approved.jsp", "jsp", "<p>Approved</p>", "markup"),
+    ],
+  });
+
+  const routeId = "route:/order/save.action";
+  const dispatches = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "dispatches_to")
+    .map((candidate) => candidate.target);
+  assert.deepEqual(dispatches, [
+    "java_method:com.acme.SaveAction#approve/0",
+    "java_method:com.acme.SaveAction#save/0",
+  ]);
+  assert.ok(
+    graph.edges
+      .filter((candidate) => candidate.source === routeId && candidate.type === "forwards_to")
+      .every((candidate) => candidate.data.outcome.classification === "configured-candidate"),
+  );
+});
+
+test("ordinary and dynamic Struts 2 requests preserve both possible dispatch methods", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/SaveAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class SaveAction {",
+          "  public String execute() { return \"success\"; }",
+          "  public String approve() { return \"approved\"; }",
+          "  public String perform() { return \"unrelated\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/order'>",
+          "  <action name='save' class='com.acme.SaveAction'>",
+          "    <result name='success'>/order/success.jsp</result>",
+          "    <result name='approved'>/order/approved.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        [
+          '<form action="/order/save.action" method="post"></form>',
+          '<form action="/order/save!approve.action" method="post"></form>',
+        ].join("\n"),
+        "markup",
+      ),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/approved.jsp", "jsp", "<p>Approved</p>", "markup"),
+    ],
+  });
+
+  const routeId = "route:/order/save.action";
+  const dispatches = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "dispatches_to")
+    .map((candidate) => candidate.target);
+  assert.deepEqual(dispatches, [
+    "java_method:com.acme.SaveAction#approve/0",
+    "java_method:com.acme.SaveAction#execute/0",
+  ]);
+  const outcomes = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "forwards_to")
+    .map((candidate) => [candidate.data.outcome.name, candidate.data.outcome.classification]);
+  assert.deepEqual(outcomes, [
+    ["approved", "configured-candidate"],
+    ["success", "configured-candidate"],
+  ]);
+});
+
+test("ordinary and dynamic Struts 2 requests retain an inherited default execute method", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/BaseAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class BaseAction {",
+          "  public String execute() { return \"success\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "src/com/acme/SaveAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class SaveAction extends BaseAction {",
+          "  public String approve() { return \"approved\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/order'>",
+          "  <action name='save' class='com.acme.SaveAction'>",
+          "    <result name='success'>/order/success.jsp</result>",
+          "    <result name='approved'>/order/approved.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        [
+          '<form action="/order/save.action" method="post"></form>',
+          '<form action="/order/save!approve.action" method="post"></form>',
+        ].join("\n"),
+        "markup",
+      ),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/approved.jsp", "jsp", "<p>Approved</p>", "markup"),
+    ],
+  });
+
+  const routeId = "route:/order/save.action";
+  const dispatches = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "dispatches_to")
+    .map((candidate) => candidate.target);
+  assert.deepEqual(dispatches, [
+    "java_method:com.acme.BaseAction#execute/0",
+    "java_method:com.acme.SaveAction#approve/0",
+  ]);
+  assert.ok(
+    graph.edges
+      .filter((candidate) => candidate.source === routeId && candidate.type === "forwards_to")
+      .every((candidate) => candidate.data.outcome.classification === "configured-candidate"),
+  );
+});
+
+test("multiple Struts 2 dynamic method hints keep every configured outcome as a candidate", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/SaveAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class SaveAction {",
+          "  public String execute() { return \"success\"; }",
+          "  public String approve() { return \"approved\"; }",
+          "  public String reject() { return \"rejected\"; }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/order'>",
+          "  <action name='save' class='com.acme.SaveAction'>",
+          "    <result name='success'>/order/success.jsp</result>",
+          "    <result name='approved'>/order/approved.jsp</result>",
+          "    <result name='rejected'>/order/rejected.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        [
+          '<form action="/order/save!approve.action" method="post"></form>',
+          '<form action="/order/save!reject.action" method="post"></form>',
+        ].join("\n"),
+        "markup",
+      ),
+      record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/order/approved.jsp", "jsp", "<p>Approved</p>", "markup"),
+      record("web/order/rejected.jsp", "jsp", "<p>Rejected</p>", "markup"),
+    ],
+  });
+
+  const routeId = "route:/order/save.action";
+  const route = graph.nodes.find((node) => node.id === routeId);
+  assert.deepEqual(
+    route.data.requestHints.map(({ dispatchMethod }) => dispatchMethod),
+    ["approve", "reject"],
+  );
+  const dispatches = graph.edges
+    .filter((candidate) => candidate.source === routeId && candidate.type === "dispatches_to")
+    .map((candidate) => candidate.target);
+  assert.deepEqual(dispatches, [
+    "java_method:com.acme.SaveAction#approve/0",
+    "java_method:com.acme.SaveAction#reject/0",
+  ]);
+  assert.equal(dispatches.includes("java_method:com.acme.SaveAction#execute/0"), false);
+  assert.ok(
+    graph.edges
+      .filter((candidate) => candidate.source === routeId && candidate.type === "forwards_to")
+      .every((candidate) => candidate.data.outcome.classification === "configured-candidate"),
+  );
+});
+
+test("absolute form and tag paths do not reconcile by Struts 2 action basename", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        "<struts><constant name='struts.action.extension' value='html'/><package namespace='/order'><action name='save' class='com.acme.SaveAction'/></package></struts>",
+        "config",
+      ),
+      record(
+        "web/order/edit.jsp",
+        "jsp",
+        [
+          '<form action="/admin/save" method="post"></form>',
+          '<s:form action="/elsewhere/save" method="post"></s:form>',
+          '<s:form action="save" namespace="/namespaced" method="post"></s:form>',
+          '<form action="<c:url value="/admin/save"/>" method="post"></form>',
+        ].join("\n"),
+        "markup",
+      ),
+    ],
+  });
+
+  assert.ok(edge(graph, "page:web/order/edit.jsp", "submits_to", "route:/admin/save"));
+  assert.ok(edge(graph, "page:web/order/edit.jsp", "submits_to", "route:/elsewhere/save.action"));
+  assert.ok(edge(graph, "page:web/order/edit.jsp", "submits_to", "route:/namespaced/save.action"));
+  assert.equal(
+    edge(graph, "page:web/order/edit.jsp", "submits_to", "route:/order/save.html"),
+    undefined,
+  );
+});
+
 test("Struts 2 action bean ids resolve through Spring bean classes", () => {
   const records = [
     record(
@@ -1010,13 +2428,32 @@ test("Struts 2 action bean ids resolve through Spring bean classes", () => {
       ].join("\n"),
     ),
     record("WEB-INF/applicationContext-struts.xml", "xml", "<beans><bean id='saveAction' class='com.acme.SaveAction'/></beans>", "config"),
-    record("WEB-INF/struts.xml", "xml", "<struts><package namespace='/order'><action name='save' class='saveAction' method='save'/></package></struts>", "config"),
+    record(
+      "WEB-INF/struts.xml",
+      "xml",
+      "<struts><package namespace='/order'><action name='save' class='saveAction' method='save'><result name='success'>/order/success.jsp</result></action></package></struts>",
+      "config",
+    ),
+    record("web/order/success.jsp", "jsp", "<p>Saved</p>", "markup"),
   ];
 
   const graph = materializeRecords({ projectRoot, records });
 
   assert.ok(edge(graph, "route:/order/save.action", "maps_to", "java_type:com.acme.SaveAction"));
   assert.ok(edge(graph, "route:/order/save.action", "dispatches_to", "java_method:com.acme.SaveAction#save/0"));
+  const outcome = edge(
+    graph,
+    "route:/order/save.action",
+    "forwards_to",
+    "page:web/order/success.jsp",
+  );
+  assert.equal(outcome.data.outcome.classification, "code-confirmed");
+  assert.deepEqual(outcome.data.outcome.codeEvidence, [{
+    file: "src/com/acme/SaveAction.java",
+    line: 3,
+    column: 26,
+    snippet: 'public String save() { return "success"; }',
+  }]);
   assert.equal(graph.warnings.some((warning) => warning.includes("saveAction")), false);
 });
 

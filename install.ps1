@@ -1470,6 +1470,15 @@ function New-InstallTransaction {
 
     $migratesTool = $mode -ceq "upgrade-v1" -or $mode -ceq "upgrade-v2"
     $migratesCommand = $mode -ceq "upgrade-v1"
+    $homeFull = Get-CanonicalPath $HOME
+    $configFull = Get-CanonicalPath $ConfigDir
+    Assert-NoReparsePointInPath -Boundary $homeFull -Path $InstallDir
+    Assert-NoReparsePointInPath -Boundary $homeFull -Path $SkillTarget
+    if ($legacySkillSha256.Length -gt 0) {
+        Assert-NoReparsePointInPath -Boundary $homeFull -Path $paths.LegacySkillTarget
+    }
+    Assert-NoReparsePointInPath -Boundary $configFull -Path $paths.LegacyToolTarget
+    Assert-NoReparsePointInPath -Boundary $configFull -Path $paths.LegacyCommandTarget
     $skillDirectoryExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $SkillDir))
     $skillExisted = [bool]($null -ne (Get-PathEntryWithoutFollowingTarget $SkillTarget))
     if (-not $skillExisted) {
@@ -1538,24 +1547,36 @@ function Assert-NoUnownedLegacyIntegrationFiles {
         $userProfile = $HOME
     }
 
-    $legacySkillEntry = Get-PathEntryWithoutFollowingTarget $LegacySkillTarget
-    if ($null -ne $legacySkillEntry -and
-        -not (Test-ManifestOwnsExternalPath -Manifest $ExistingManifest -Kind "agent-skill" -Path $LegacySkillTarget)) {
-        Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $LegacySkillTarget
-        if ($legacySkillEntry.PSIsContainer) {
-            throw "旧 /understand Skill 候选不是普通文件，无法安全识别：$LegacySkillTarget。安装器已保留现场并停止。"
-        }
-        [byte[]]$legacySkillBytes = @(
-            Get-Content -LiteralPath $LegacySkillTarget -Encoding Byte -TotalCount 1048576 -ReadCount 0
-        )
-        $legacySkillContent = [Text.Encoding]::UTF8.GetString($legacySkillBytes)
-        $hasLegacyAtlasSignature = (
-            $legacySkillContent.Contains(".legacy-code-atlas/bin/legacy-code-atlas.mjs") -or
-            $legacySkillContent.Contains("legacy_atlas_")
-        )
-        if ($hasLegacyAtlasSignature) {
-            $legacySkillHash = (Get-ContentHash $LegacySkillTarget).ToUpperInvariant()
-            throw "检测到无有效 ownership manifest 的旧 Atlas /understand Skill：$LegacySkillTarget（SHA-256: $legacySkillHash）。安装器已保留文件并停止；请先备份并确认来源，不要直接删除该 Skill。"
+    $ownsLegacySkill = Test-ManifestOwnsExternalPath `
+        -Manifest $ExistingManifest `
+        -Kind "agent-skill" `
+        -Path $LegacySkillTarget
+    $legacySkillDirectoryEntry = Get-PathEntryWithoutFollowingTarget $LegacySkillDir
+    $legacySkillDirectoryIsReparsePoint = (
+        $null -ne $legacySkillDirectoryEntry -and
+        [bool]($legacySkillDirectoryEntry.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    )
+    if (-not $ownsLegacySkill -and $legacySkillDirectoryIsReparsePoint) {
+        Write-Host "检测到不属于 Atlas ownership manifest 的 /understand 重解析点 (reparse point)：$LegacySkillDir。该 namespace 不在 Atlas 管理范围内，原样保留并跳过。"
+    } else {
+        $legacySkillEntry = Get-PathEntryWithoutFollowingTarget $LegacySkillTarget
+        if ($null -ne $legacySkillEntry -and -not $ownsLegacySkill) {
+            Assert-NoReparsePointInPath -Boundary (Get-CanonicalPath $HOME) -Path $LegacySkillTarget
+            if ($legacySkillEntry.PSIsContainer) {
+                throw "旧 /understand Skill 候选不是普通文件，无法安全识别：$LegacySkillTarget。安装器已保留现场并停止。"
+            }
+            [byte[]]$legacySkillBytes = @(
+                Get-Content -LiteralPath $LegacySkillTarget -Encoding Byte -TotalCount 1048576 -ReadCount 0
+            )
+            $legacySkillContent = [Text.Encoding]::UTF8.GetString($legacySkillBytes)
+            $hasLegacyAtlasSignature = (
+                $legacySkillContent.Contains(".legacy-code-atlas/bin/legacy-code-atlas.mjs") -or
+                $legacySkillContent.Contains("legacy_atlas_")
+            )
+            if ($hasLegacyAtlasSignature) {
+                $legacySkillHash = (Get-ContentHash $LegacySkillTarget).ToUpperInvariant()
+                throw "检测到无有效 ownership manifest 的旧 Atlas /understand Skill：$LegacySkillTarget（SHA-256: $legacySkillHash）。安装器已保留文件并停止；请先备份并确认来源，不要直接删除该 Skill。"
+            }
         }
     }
 

@@ -199,6 +199,36 @@ test("CLI analyzes a project and writes the default deterministic index", async 
   assert.equal(firstIndex, secondIndex);
 });
 
+test("CLI rejects an empty analysis target instead of writing a successful empty index", async (t) => {
+  const project = await mkdtemp(path.join(tmpdir(), "legacy-atlas-cli-empty-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  await mkdir(path.join(project, ".legacy-code-atlas"));
+
+  await assertCliError(
+    ["analyze", project, "--main-thread"],
+    /未生成任何可分析节点/u,
+  );
+  await assert.rejects(access(path.join(project, ".legacy-code-atlas", "index.json")));
+});
+
+test("CLI docs rejects an existing zero-node index instead of generating empty documents", async (t) => {
+  const project = await mkdtemp(path.join(tmpdir(), "legacy-atlas-cli-empty-index-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  await mkdir(atlasDirectory);
+  await writeFile(path.join(atlasDirectory, "index.json"), `${JSON.stringify({
+    schemaVersion: "1.0.0",
+    project: { root: project },
+    summary: { nodes: 0, edges: 0, nodeTypes: {}, edgeTypes: {} },
+    nodes: [],
+    edges: [],
+    warnings: [],
+  })}\n`, "utf8");
+
+  await assertCliError(["docs", project], /未生成任何可分析节点/u);
+  await assert.rejects(access(path.join(atlasDirectory, "docs")));
+});
+
 test("CLI analyzes source-derived reserved JSP fields and path-like iBATIS identifiers", async (t) => {
   const project = await projectCopy(t);
   await writeFile(

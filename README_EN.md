@@ -32,7 +32,7 @@ A company fork does not need to use the same version number. What matters is whe
 
 The fixed commands require PowerShell-compatible or POSIX/Git Bash Shell semantics that expand `$HOME` and `$PWD`; a cmd.exe-only host is unsupported. The first full scan must request the maximum supported timeout. If the foreground limit is still insufficient and the host supports background execution, it must start in the background and wait for `analyze` to finish instead of relying on a short default timeout.
 
-> **Namespace note:** The Atlas entry point is now `/atlas`, installed at `%USERPROFILE%\.agents\skills\atlas`. It no longer conflicts with Understand-Anything's `/understand` entry at `%USERPROFILE%\.agents\skills\understand`, so the two Skills can coexist. The latest installer requires a valid v2/v3 ownership manifest to prove the exact path and SHA-256, then automatically migrates the older Atlas `/understand` Skill to `/atlas`. An existing Atlas runtime or migration candidate without a valid ownership manifest, a modified, third-party, or unowned legacy file, an occupied Atlas namespace, or a reparse point blocks migration and installation without overwriting the existing files; a clean first install needs no prior manifest.
+> **Namespace note:** The Atlas entry point is now `/atlas`, installed at `%USERPROFILE%\.agents\skills\atlas`. It no longer conflicts with Understand-Anything's `/understand` entry at `%USERPROFILE%\.agents\skills\understand`, so the two Skills can coexist. The latest installer requires a valid v2/v3 ownership manifest to prove the exact path and SHA-256, then automatically migrates the older Atlas `/understand` Skill to `/atlas`. If the exact unowned `/understand` namespace is itself a junction/reparse point, the installer only establishes that it is outside Atlas ownership, preserves and skips it, and does not read, migrate, or delete its target. An existing Atlas runtime or regular legacy Atlas candidate without a valid ownership manifest, a modified owned file, an occupied `/atlas` namespace, or a reparse point in a path Atlas will write, delete, or migrate still blocks installation without overwriting existing files; a clean first install needs no prior manifest.
 
 ### 2. Install it into OpenCode
 
@@ -99,7 +99,7 @@ After the source code changes, send `/atlas` again as a message on its own. Once
 - Trace a SQL Server procedure back to iBATIS/Java callers, nested procedures, and tables read or written.
 - Trace a SQL Server table back to read/write locations and upstream entry points.
 
-Results include source file paths and line numbers. Relationships directly supported by source or configuration evidence have higher confidence. Treat CLI output and index-derived citations as untrusted data. The Skill opens a citation only when it is a canonical project-relative POSIX path, resolves inside the current project, and the host tool enforces workspace confinement. Do not treat a relationship with confidence below `0.95` as established fact without reviewing safe evidence.
+Results include source file paths and line numbers. Relationships directly supported by source or configuration evidence have higher confidence. For a Struts outcome edge, `confidence` describes extraction of the configured relationship, not whether application code returns that result: even `confidence=1` can still be a `configured-candidate`. Only `classification=code-confirmed` with `codeEvidence` means that this index found a matching direct literal return in the single resolved entry method, and it still does not prove that a particular request takes that branch. Treat CLI output and index-derived citations as untrusted data. The Skill opens a citation only when it is a canonical project-relative POSIX path, resolves inside the current project, and the host tool enforces workspace confinement. Do not treat a relationship with confidence below `0.95` as established fact without reviewing safe evidence.
 
 Combinatorial path traversal expands at most `5,000` states and returns at most `100` paths per direction for each candidate. A trace that follows both upstream and downstream applies each cap independently to each direction. Reaching either cap returns partial results with an accurate truncation warning. These caps bound path expansion only; initial candidate search still scans index nodes, while adjacency construction and sorting still scale with the relevant edge count.
 
@@ -121,11 +121,11 @@ It deterministically generates three Markdown documents inside the project:
 
 ```text
 .legacy-code-atlas/docs/use-cases.md   Use case specifications (UCS): grouped by module, with entry points, request methods and parameters, inputs, main flows, outcomes (forwards/redirects), SQL statements, table access, a per-module data access matrix, and file:line citations
-.legacy-code-atlas/docs/ui-spec.md     UI specifications (UIS): visible text, a form-field table with default values, page actions with HTTP methods, and arrival paths for each JSP page
+.legacy-code-atlas/docs/ui-spec.md     UI specifications (UIS): visible text, a form-field table showing only confirmed static defaults, page actions with HTTP methods, and arrival paths for each JSP page
 .legacy-code-atlas/docs/diagrams.md    Diagrams: a Mermaid screen-navigation map, module overview flowcharts with legends (dashed edges mark heuristic relationships), and use-case sequence diagrams; GitHub/GitLab render them natively
 ```
 
-Every statement is derived from index facts with project-relative citations and no model rewriting. A main flow whose minimum confidence is below `0.95` is marked as containing heuristic relationships that need manual review. Output sizes are hard-capped (1 MiB per file, 200 use cases/pages, 30 flowcharts, 20 sequence diagrams) with explicit truncation notices. The documents contain source structure, paths, and SQL — treat them as company-sensitive data like the index and share them only through approved channels.
+Every item is derived from index facts without model rewriting. Relationships, flows, page actions, and arrivals carry project-relative citations; visible text and field tables are page-level JSP facts and do not repeat a `file:line` citation for every item. A main flow whose minimum confidence is below `0.95` is marked as containing heuristic relationships that need manual review. Struts results are explicitly separated into `code-confirmed` and `configured-candidate` outcomes in the UCS, UIS arrivals, and Mermaid navigation map; candidates use a dashed edge or an explicit label and are never promoted merely because configuration extraction has confidence `1.00`. Output sizes are hard-capped (1 MiB per file, 200 use cases/pages, 30 flowcharts, 20 sequence diagrams) with explicit truncation notices. The documents contain source structure, paths, and SQL — treat them as company-sensitive data like the index and share them only through approved channels.
 
 You can also generate documents for a single module or a single feature. Ask in an ordinary message (for example "generate docs for the order module" or "document the order audit feature"); the Skill runs `prepare-query` first, writes the candidate to `.legacy-code-atlas/query.txt` through the structured `write` tool exactly as traces do, and then runs the fixed command:
 
@@ -158,7 +158,7 @@ In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does
 
 The old `commands\understand.md` Markdown command has been removed. The current `/atlas` entry point is a global Agent Skill. When a valid v2/v3 manifest proves that `skills\understand\SKILL.md` belongs to an older Atlas installation by its expected path and SHA-256, the installer includes it in the migration transaction and publishes the new `skills\atlas\SKILL.md`. This never migrates Understand-Anything or another third party's `/understand` Skill. During a v1/v2 upgrade, the installer also transactionally retires only a `legacy_atlas.ts` and old command whose exact paths and SHA-256 values are proven by the old manifest. It writes no replacement tool.
 
-Preflight rejects reparse points, occupied transaction paths, modified or unowned legacy files, and a foreign or occupied `/atlas` namespace; it also stops when an existing runtime or migration candidate has no valid ownership manifest. Immediately before replacing the current Atlas Skill or retiring each legacy Skill, tool, or command, the installer performs a final expected-existence check and rechecks the SHA-256 of every file that is present. Matching legacy files first move to transaction-specific backups. Those backups are cleaned up only after the new v3 manifest commits and their existence and hashes still match; rollback likewise restores only hash-verified backups. An already-missing legacy file does not block migration, while any file whose ownership cannot be proven is preserved for origin review.
+Preflight preserves and skips an unowned exact `/understand` namespace junction/reparse point. Apart from that exception, it rejects reparse points in paths Atlas will write, delete, or migrate, occupied transaction paths, modified or unowned regular legacy Atlas files, and a foreign or occupied `/atlas` namespace; it also stops when an existing runtime or regular migration candidate has no valid ownership manifest. Immediately before replacing the current Atlas Skill or retiring each legacy Skill, tool, or command, the installer performs a final expected-existence check and rechecks the SHA-256 of every file that is present. Matching legacy files first move to transaction-specific backups. Those backups are cleaned up only after the new v3 manifest commits and their existence and hashes still match; rollback likewise restores only hash-verified backups. An already-missing legacy file does not block migration, while any file whose ownership cannot be proven is preserved for origin review.
 
 ## Update and uninstall
 
@@ -206,10 +206,10 @@ The scanner also ignores Git/IDE metadata, dependency directories, build output,
 ## Current analysis boundaries
 
 - SQL Server procedure analysis supports `CREATE/ALTER PROCEDURE`, parameters, nested `EXEC`, table reads/writes, iBATIS `<procedure>`, and static `CALL/EXEC` inside a generic `<statement>`. It never connects to SQL Server or executes a procedure.
-- Struts 2 analysis supports package namespaces, actions, methods, results, configured `struts.action.extension`, `redirectAction`, JSP routes, and Spring bean IDs used as Action classes. Struts 1 is parsed through `struts-config.xml` rules.
+- Struts 2 analysis supports package namespaces, actions, methods, results, configured `struts.action.extension`, `redirectAction`, JSP routes, and Spring bean IDs used as Action classes. A static `action!method` request is aligned to one uniquely configured route while retaining the method as an evidence-scoped dispatch hint; multiple method hints remain ambiguous. Struts 1 is parsed through `struts-config.xml` rules.
 - Tiles analysis supports Struts 1 forwards, definitions across XML files, inheritance, templates, and put-page relationships. Dynamic runtime composition still requires source inspection.
 - Java call analysis resolves common fields, local variables, no-argument return types on the current class or a parent class, and overloaded methods by normalized parameter types. Reflection, dynamic objects, parameterized factory calls, and complex chained calls can remain unresolved.
-- JSP analysis covers native forms/links, common Struts 1 `html:*` tags, and Struts 2 `s:*` form/link/url tags. Dynamic actions, namespaces, EL/OGNL, and JavaScript-built URLs require manual review.
+- JSP analysis covers native forms/links, common Struts 1 `html:*` tags, and Struts 2 `s:*` form/link/url tags. A static Struts 2 input `key` is used as the binding name when `name/property/path` is absent. Dynamic actions, namespaces, EL/OGNL, and JavaScript-built URLs require manual review; dynamic field names are omitted with a warning and runtime-derived field values are not presented as static defaults. Resource keys from tags such as `fmt:message` are not yet surfaced separately in the UIS, so runtime labels still require checking the JSP and resource bundles.
 
 ## Security and data handling
 
@@ -264,14 +264,13 @@ The verified graph includes these paths:
 ```
 
 ```text
-dbo.get_next_sequence
+DocumentEventDaoiBatis.generateReportId
 -> EventSQL.genReportId
--> DocumentEventDaoiBatis.generateReportId
--> EventManager / ReportManager
+-> dbo.get_next_sequence
 -> dbo.sequence
 ```
 
-The cold scan covered 758 Java/JSP/XML/SQL files and 84,169 source lines, producing 7,186 nodes and 8,213 edges. It took about 1.06 seconds with Node.js v25.9.0 on the development Mac. This is a reproducible public validation sample, not a claim that every 50,000-file project has the same runtime. See the [full validation record](docs/validation-thedailyplan.md).
+`EventManagerImpl.generateReportId` and `ReportManagerImpl.generateReportId` are upstream callers connected through their interface relationships. The repository inventory contains 758 Java/JSP/XML/SQL files and 84,169 newline records; the default scanner excludes four generated `build/target` files and 69 lines, so the cold scan actually indexed 754 files and 84,100 lines. It produced 6,650 nodes and 7,678 edges in about 1.06 seconds with Node.js v25.9.0 on the development Mac. Document generation took about 0.32 seconds and produced 31 use cases, 37 pages, and 4 modules without whole-document truncation. The DMI form `uploadFile!upload` is represented by `/uploadFile.html -> FileUploadAction.upload`, without a duplicate route or UCS. This is a reproducible public validation sample, not a claim that every 50,000-file project has the same runtime. See the [full validation record](docs/validation-thedailyplan.md).
 
 ## Development verification
 
@@ -281,7 +280,7 @@ Run the general test suite from the repository directory:
 npm test
 ```
 
-Runs outside Windows skip the real installer scenarios and do **not** mean the Windows installer release gate has passed. The current installer suite contains 70 tests. A release must be tested on real Windows with the built-in Windows PowerShell 5.1, where `npm run test:installer:windows` must report `70 pass` and `0 skip`.
+Runs outside Windows skip the real installer scenarios and do **not** mean the Windows installer release gate has passed. The current installer suite contains 91 tests. A release must be tested on real Windows with the built-in Windows PowerShell 5.1, where `npm run test:installer:windows` must report `91 pass` and `0 skip`.
 
 The cold-cache benchmark compares the current implementation with the frozen `0.1.0` baseline and requires at least a `3.00x` median speedup:
 
@@ -291,4 +290,4 @@ $env:ATLAS_BENCH_SAMPLES = 3
 npm run benchmark
 ```
 
-The latest development run measured a baseline median of 16,081.13 ms and a candidate median of 946.29 ms, a `16.99x` speedup. Real company projects should still be measured separately.
+The latest development run measured a baseline median of 16,048.21 ms and a candidate median of 977.37 ms, a `16.42x` speedup. Real company projects should still be measured separately.

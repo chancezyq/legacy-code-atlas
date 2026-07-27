@@ -12,7 +12,7 @@ The first full scan must request the maximum supported timeout. If the foregroun
 
 ## Windows installation
 
-The Atlas Agent Skill now installs at `%USERPROFILE%\.agents\skills\atlas\SKILL.md` with the `/atlas` entry point. It does not occupy Understand-Anything's `%USERPROFILE%\.agents\skills\understand\SKILL.md` (`/understand` entry), so the two Skills can coexist. The latest installer requires a valid v2/v3 ownership manifest to prove the exact path and SHA-256, then automatically migrates the older Atlas `/understand` Skill to `/atlas`. An existing Atlas runtime or migration candidate without a valid ownership manifest, a modified, third-party, or unowned legacy file, an occupied Atlas namespace, or a reparse point blocks migration and installation without overwriting the existing files; a clean first install needs no prior manifest.
+The Atlas Agent Skill now installs at `%USERPROFILE%\.agents\skills\atlas\SKILL.md` with the `/atlas` entry point. It does not occupy Understand-Anything's `%USERPROFILE%\.agents\skills\understand\SKILL.md` (`/understand` entry), so the two Skills can coexist. The latest installer requires a valid v2/v3 ownership manifest to prove the exact path and SHA-256, then automatically migrates the older Atlas `/understand` Skill to `/atlas`. If the exact unowned `/understand` namespace is itself a junction/reparse point, the installer only establishes that it is outside Atlas ownership, preserves and skips it, and does not read, migrate, or delete its target. An existing Atlas runtime or regular legacy Atlas candidate without a valid ownership manifest, a modified owned file, an occupied `/atlas` namespace, or a reparse point in a path Atlas will write, delete, or migrate still blocks installation without overwriting existing files; a clean first install needs no prior manifest.
 
 Windows PowerShell 5.1 and Node.js 20 or later are required. Download and extract the source, open Windows PowerShell in the `legacy-code-atlas` directory, and run:
 
@@ -91,7 +91,7 @@ In v3, `configDir` is diagnostic metadata used to find legacy conflicts. It does
 
 The former Markdown command at `commands\understand.md` has been removed. When a valid v2/v3 manifest proves that `skills\understand\SKILL.md` belongs to an older Atlas installation by its expected path and SHA-256, the installer automatically includes it in the migration transaction and publishes the new `skills\atlas\SKILL.md`. This never migrates Understand-Anything or another third party's `/understand` Skill. A v1/v2 upgrade to v3 also retires only a `legacy_atlas.ts` and old command whose exact paths and SHA-256 values are proven by the old manifest; it never writes a placeholder tool. Neither legacy file is a current entry point.
 
-Preflight rejects reparse points, occupied transaction paths, modified or unowned legacy files, and a foreign or occupied `/atlas` namespace; it also stops when an existing runtime or migration candidate has no valid ownership manifest. Immediately before replacing the current Atlas Skill or retiring each legacy Skill, tool, or command, the installer performs a final expected-existence check and rechecks the SHA-256 of every file that is present. Matching legacy files first move to transaction-specific backups. Those backups are cleaned up only after the new v3 manifest commits and their existence and hashes still match; rollback likewise restores only hash-verified backups. An already-missing legacy file does not block migration, while any file whose ownership cannot be proven is preserved for origin review.
+Preflight preserves and skips an unowned exact `/understand` namespace junction/reparse point. Apart from that exception, it rejects reparse points in paths Atlas will write, delete, or migrate, occupied transaction paths, modified or unowned regular legacy Atlas files, and a foreign or occupied `/atlas` namespace; it also stops when an existing runtime or regular migration candidate has no valid ownership manifest. Immediately before replacing the current Atlas Skill or retiring each legacy Skill, tool, or command, the installer performs a final expected-existence check and rechecks the SHA-256 of every file that is present. Matching legacy files first move to transaction-specific backups. Those backups are cleaned up only after the new v3 manifest commits and their existence and hashes still match; rollback likewise restores only hash-verified backups. An already-missing legacy file does not block migration, while any file whose ownership cannot be proven is preserved for origin review.
 
 ## Inspecting manifest v3
 
@@ -256,7 +256,7 @@ Before a release, run this on real Windows using the built-in Windows PowerShell
 npm run test:installer:windows
 ```
 
-The current suite contains 70 tests. The release gate passes only with `70 pass` and `0 skip`. Non-Windows systems skip the real installer scenarios. Those runs are useful for development syntax checks but are not evidence that the Windows release gate passed.
+The current suite contains 91 tests. The release gate passes only with `91 pass` and `0 skip`. Non-Windows systems skip the real installer scenarios. Those runs are useful for development syntax checks but are not evidence that the Windows release gate passed.
 
 ## Large projects and sensitive data
 

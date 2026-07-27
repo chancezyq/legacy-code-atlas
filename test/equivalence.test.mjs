@@ -28,7 +28,7 @@ function nodeById(graph, id) {
   return node;
 }
 
-function normalizedForProvenRequestParameters(graph) {
+function normalizedForExpectedEvidenceAdditions(graph) {
   const normalized = structuredClone(graph);
   const expectedAdditions = [
     ["route:/order/audit.do", "decision", "PASS"],
@@ -41,10 +41,53 @@ function normalizedForProvenRequestParameters(graph) {
     assert.ok(hint, `${routeId} must retain proven ${parameter}=${JSON.stringify(value)}`);
     delete hint.parameters[parameter];
   }
+
+  const auditRoute = nodeById(normalized, "route:/order/audit.do");
+  const auditHint = auditRoute.data.requestHints?.find(
+    (candidate) => candidate.parameters?.orderId === "",
+  );
+  assert.ok(auditHint, "runtime-derived orderId default must remain an unresolved static parameter");
+  auditHint.parameters.orderId = "${order.id}";
+
+  const expectedOutcomes = new Map([
+    [
+      "route:/order/audit.do|forwards_to|page:order/auditSuccess.jsp|Struts forward success",
+      {
+        framework: "struts1",
+        name: "success",
+        classification: "code-confirmed",
+        codeEvidence: [{
+          file: "src/com/acme/order/web/OrderAuditAction.java",
+          line: 17,
+          column: 9,
+          snippet: 'return mapping.findForward("success");',
+        }],
+      },
+    ],
+    [
+      "route:/order/audit.do|forwards_to|page:web/order/audit.jsp|Struts forward error",
+      {
+        framework: "struts1",
+        name: "error",
+        classification: "configured-candidate",
+        codeEvidence: [],
+      },
+    ],
+  ]);
+  const outcomeEdges = normalized.edges.filter((edge) => edge.data?.outcome);
+  assert.deepEqual(
+    outcomeEdges.map((edge) => edge.id).sort(),
+    [...expectedOutcomes.keys()].sort(),
+    "only the expected Struts outcomes may gain classification metadata",
+  );
+  for (const edge of outcomeEdges) {
+    assert.deepEqual(edge.data.outcome, expectedOutcomes.get(edge.id));
+    delete edge.data.outcome;
+  }
   return normalized;
 }
 
-test("frozen baseline differs only by newly proven request parameters", async (t) => {
+test("frozen baseline differs only by expected request evidence and outcome classifications", async (t) => {
   const parent = await mkdtemp(path.join(tmpdir(), "legacy-atlas-baseline-"));
   const baselineRoot = path.join(parent, "runtime");
   t.after(() => rm(parent, { recursive: true, force: true }));
@@ -59,7 +102,7 @@ test("frozen baseline differs only by newly proven request parameters", async (t
   assert.equal(baseline.graph.project.root, projectRoot);
   assert.equal(actual.project.root, projectRoot);
   assert.notEqual(baseline.serialized, candidateSerialized);
-  const normalizedSerialized = serializeGraph(normalizedForProvenRequestParameters(actual));
+  const normalizedSerialized = serializeGraph(normalizedForExpectedEvidenceAdditions(actual));
   assert.doesNotThrow(() => assertGraphEquivalent(baseline, normalizedSerialized));
 });
 

@@ -1,3 +1,4 @@
+import { normalizeConfiguredOutcome } from "./outcome-metadata.mjs";
 import { replaceUnsafeTextControls } from "./text-safety.mjs";
 
 const MAX_TRACE_MARKDOWN_BYTES = 256 * 1024;
@@ -87,6 +88,21 @@ function nodeLabel(node) {
   return node ? `${renderInlineText(node.type)}:${renderInlineText(node.name)}` : "unknown";
 }
 
+function outcomeCodeEvidence(edge, edgeType = edge?.type) {
+  return normalizeConfiguredOutcome(edge, edgeType)?.codeEvidence ?? [];
+}
+
+function outcomeClassification(edge, edgeType = edge?.type) {
+  return normalizeConfiguredOutcome(edge, edgeType)?.classification ?? null;
+}
+
+function relationTypeLabel(edgeType, classification) {
+  const suffix = classification === "configured-candidate"
+    ? " [配置候选]"
+    : classification === "code-confirmed" ? " [代码返回可能]" : "";
+  return `${renderInlineText(edgeType)}${suffix}`;
+}
+
 function countMissingPathEdges(paths, edgeById, writer) {
   const checkedPaths = cappedItems(paths, MAX_CHECKED_PATHS, writer);
   let missing = 0;
@@ -138,15 +154,29 @@ export function renderTraceMarkdown(trace, options = {}) {
     if ((currentPath.nodes?.length ?? 0) > pathNodes.length) writer.markTruncated();
     for (let index = 0; index < pathNodes.length; index += 1) {
       pieces.push(labelForId(pathNodes[index]));
-      if (currentPath.edges?.[index]) pieces.push(`--${renderInlineText(currentPath.edges[index])}-->`);
+      if (currentPath.edges?.[index]) {
+        const edgeType = currentPath.edges[index];
+        const edge = edgeById.get(currentPath.edgeIds?.[index]);
+        pieces.push(`--${relationTypeLabel(edgeType, outcomeClassification(edge, edgeType))}-->`);
+      }
     }
     if (!writer.line(`- ${pieces.join(" ")}`)) break;
   }
 
   const relations = cappedItems(trace.edges, MAX_RENDERED_RELATIONS, writer);
-  const proven = relations.filter((edge) => edge.confidence >= 0.95);
-  const heuristic = relations.filter((edge) => edge.confidence < 0.95);
-  for (const [heading, edges] of [["确定关系", proven], ["启发式关系", heuristic]]) {
+  const configuredCandidates = relations.filter(
+    (edge) => outcomeClassification(edge) === "configured-candidate",
+  );
+  const remaining = relations.filter(
+    (edge) => outcomeClassification(edge) !== "configured-candidate",
+  );
+  const proven = remaining.filter((edge) => edge.confidence >= 0.95);
+  const heuristic = remaining.filter((edge) => edge.confidence < 0.95);
+  for (const [heading, edges, candidateSection] of [
+    ["确定关系", proven, false],
+    ["配置候选关系", configuredCandidates, true],
+    ["启发式关系", heuristic, false],
+  ]) {
     if (writer.exhausted) break;
     if (!writer.lines("", `## ${heading}`, "")) break;
     if (edges.length === 0) {
@@ -155,9 +185,15 @@ export function renderTraceMarkdown(trace, options = {}) {
     }
     for (const edge of edges) {
       const refs = evidenceRefs(edge, writer);
-      const line = `- ${labelForId(edge.source)} --${renderInlineText(edge.type)}--> ${labelForId(edge.target)}`
-        + `；置信度 ${edge.confidence.toFixed(2)}；${renderInlineText(edge.reason || "无说明")}`
-        + (refs.length ? `；证据 ${refs.join(", ")}` : "");
+      const classification = outcomeClassification(edge);
+      const codeRefs = classification === "code-confirmed"
+        ? evidenceRefs({ evidence: outcomeCodeEvidence(edge) }, writer)
+        : [];
+      const line = `- ${labelForId(edge.source)} --${relationTypeLabel(edge.type, classification)}--> ${labelForId(edge.target)}`
+        + `；${candidateSection ? "配置提取" : ""}置信度 ${edge.confidence.toFixed(2)}；${renderInlineText(edge.reason || "无说明")}`
+        + (candidateSection ? "；当前索引未能从唯一解析入口确认该配置结果" : "")
+        + (refs.length ? `；${candidateSection ? "配置" : ""}证据 ${refs.join(", ")}` : "")
+        + (codeRefs.length ? `；代码证据 ${codeRefs.join(", ")}` : "");
       if (!writer.line(line)) break;
     }
   }

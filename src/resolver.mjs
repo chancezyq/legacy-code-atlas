@@ -1,24 +1,149 @@
 import { buildResolverIndexes } from "./resolver-indexes.mjs";
 
-function simpleName(typeName) {
-  return String(typeName ?? "").replace(/<.*>/g, "").split(".").at(-1);
+function sourceTypeName(typeName) {
+  return String(typeName ?? "")
+    .replace(/<.*>/g, "")
+    .replace(/(?:\s*\[\s*\])+$/gu, "")
+    .trim();
 }
 
-function candidatesForType(indexes, typeName, context = null) {
+function simpleName(typeName) {
+  return sourceTypeName(typeName).split(".").at(-1);
+}
+
+function globallyVisibleTypes(records) {
+  return records.filter((type) => type.topLevel !== false);
+}
+
+function enclosingType(indexes, typeRecord) {
+  if (!typeRecord || typeRecord.topLevel !== false) return null;
+  if (typeRecord.canonicalName && typeRecord.name) {
+    const suffix = `.${typeRecord.name}`;
+    if (typeRecord.canonicalName.endsWith(suffix)) {
+      const parentCanonical = typeRecord.canonicalName.slice(0, -suffix.length);
+      const canonicalParent = indexes.typesByCanonical.get(parentCanonical)?.[0];
+      if (canonicalParent) return canonicalParent;
+    }
+  }
+  const syntheticOffset = ["$local$", "$nested$"]
+    .map((marker) => typeRecord.fullName.indexOf(marker))
+    .filter((offset) => offset !== -1)
+    .sort((left, right) => left - right)[0];
+  if (syntheticOffset === undefined) return null;
+  return indexes.typesByFull.get(typeRecord.fullName.slice(0, syntheticOffset))?.[0] ?? null;
+}
+
+function lexicalTypeCandidates(indexes, sourceName, ownerType, includeInherited) {
+  const visited = new Set();
+  let current = ownerType;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    if (current.canonicalName) {
+      const candidates = indexes.typesByCanonical.get(`${current.canonicalName}.${sourceName}`);
+      if (candidates) return candidates;
+    }
+    if (includeInherited) {
+      const inherited = inheritedMemberTypeCandidates(indexes, sourceName, current);
+      if (inherited.length) return inherited;
+    }
+    current = enclosingType(indexes, current);
+  }
+  return [];
+}
+
+function headerTypeCandidates(indexes, typeName, typeRecord) {
+  return candidatesForType(
+    indexes,
+    typeName,
+    indexes.javaFileByTypeRecord.get(typeRecord),
+    enclosingType(indexes, typeRecord),
+    true,
+  );
+}
+
+function directSuperTypes(indexes, typeRecord) {
+  const candidates = [typeRecord?.extendsType, ...(typeRecord?.implementsTypes ?? [])]
+    .filter(Boolean)
+    .flatMap((declaredType) => headerTypeCandidates(indexes, declaredType, typeRecord));
+  return [...new Set(candidates)];
+}
+
+function inheritedMemberTypeCandidates(indexes, sourceName, ownerType) {
+  const visited = new Set(ownerType ? [ownerType] : []);
+  let frontier = directSuperTypes(indexes, ownerType);
+  while (frontier.length) {
+    const level = [...new Set(frontier)].filter((type) => !visited.has(type));
+    for (const type of level) visited.add(type);
+    const matches = [];
+    const seenMatches = new Set();
+    for (const type of level) {
+      if (!type.canonicalName) continue;
+      for (const match of indexes.typesByCanonical.get(`${type.canonicalName}.${sourceName}`) ?? []) {
+        if (seenMatches.has(match)) continue;
+        seenMatches.add(match);
+        matches.push(match);
+      }
+    }
+    if (matches.length) return matches;
+    frontier = level.flatMap((type) => directSuperTypes(indexes, type));
+  }
+  return [];
+}
+
+function candidatesForType(indexes, typeName, context = null, ownerType = null, includeInherited = true) {
   if (!typeName) return [];
-  const direct = indexes.typesByFull.get(typeName);
+  const sourceName = sourceTypeName(typeName);
+  const direct = indexes.typesByFull.get(sourceName);
   if (direct) return direct;
-  const simple = simpleName(typeName);
+  const canonical = indexes.typesByCanonical.get(sourceName);
+  if (canonical) return canonical;
+  const simple = simpleName(sourceName);
   if (context) {
-    const explicitImport = context.imports?.find((importName) => importName.endsWith(`.${simple}`));
-    if (explicitImport && indexes.typesByFull.has(explicitImport)) return indexes.typesByFull.get(explicitImport);
-    const samePackage = context.packageName ? `${context.packageName}.${simple}` : "";
-    if (samePackage && indexes.typesByFull.has(samePackage)) return indexes.typesByFull.get(samePackage);
+    const lexical = lexicalTypeCandidates(indexes, sourceName, ownerType, includeInherited);
+    if (lexical.length) return lexical;
+    const [importedRoot, ...memberPath] = sourceName.split(".");
+    const explicitImport = context.imports?.find((importName) => importName.endsWith(`.${importedRoot}`));
+    const importedName = explicitImport
+      ? [explicitImport, ...memberPath].join(".")
+      : "";
+    const imported = importedName
+      ? indexes.typesByCanonical.get(importedName) ?? indexes.typesByFull.get(importedName)
+      : null;
+    if (imported) return imported;
+    const samePackage = context.packageName ? `${context.packageName}.${sourceName}` : "";
+    const packaged = samePackage
+      ? indexes.typesByCanonical.get(samePackage) ?? indexes.typesByFull.get(samePackage)
+      : null;
+    if (packaged) return packaged;
     const wildcardPrefixes = (context.imports ?? []).filter((importName) => importName.endsWith(".*")).map((importName) => importName.slice(0, -2));
-    const wildcardMatches = (indexes.typesBySimple.get(simple) ?? []).filter((record) => wildcardPrefixes.some((prefix) => record.fullName.startsWith(`${prefix}.`)));
+    const wildcardMatches = [];
+    const seenWildcardTypes = new Set();
+    for (const prefix of wildcardPrefixes) {
+      const importedName = `${prefix}.${sourceName}`;
+      const importedRecords = indexes.typesByCanonical.get(importedName)
+        ?? indexes.typesByFull.get(importedName)
+        ?? [];
+      for (const record of importedRecords) {
+        if (seenWildcardTypes.has(record)) continue;
+        seenWildcardTypes.add(record);
+        wildcardMatches.push(record);
+      }
+    }
     if (wildcardMatches.length) return wildcardMatches;
   }
-  return indexes.typesBySimple.get(simple) ?? [];
+  return globallyVisibleTypes(indexes.typesBySimple.get(simple) ?? []);
+}
+
+function routeCandidatesForType(indexes, typeName) {
+  const exact = indexes.typesByFull.get(typeName);
+  const candidates = exact ?? (String(typeName ?? "").includes(".") ? [] : candidatesForType(indexes, typeName));
+  return candidates.filter((type) => (
+    (!type.kind || type.kind === "class")
+    && (
+      type.topLevel !== false
+      || (type.staticMember === true && type.fullName === typeName)
+    )
+  ));
 }
 
 function methodsNamed(indexes, typeId, methodName) {
@@ -42,6 +167,13 @@ function recordMethodsNamed(indexes, typeRecord, methodName, methodArity, method
 
 function simpleMethodSignature(methodSignature) {
   return String(methodSignature ?? "").replace(/(?:[A-Za-z_$][\w$]*\.)+([A-Za-z_$][\w$]*)/g, "$1");
+}
+
+function isStruts1EntryMethod(method) {
+  return method.visibility === "public"
+    && simpleName(method.returnType) === "ActionForward"
+    && simpleMethodSignature(method.methodSignature)
+      === "ActionMapping,ActionForm,HttpServletRequest,HttpServletResponse";
 }
 
 function matchingImplementations(implementationCandidates, contractMethod) {
@@ -95,15 +227,16 @@ function routeMatches(pattern, url) {
 
 function parentTypes(indexes, typeRecord) {
   if (!typeRecord?.extendsType) return [];
-  return candidatesForType(indexes, typeRecord.extendsType, indexes.javaFileByTypeRecord.get(typeRecord));
+  return headerTypeCandidates(indexes, typeRecord.extendsType, typeRecord);
 }
 
-function inheritedEntryMethods(indexes, typeRecord, entryNames) {
+function inheritedEntryMethods(indexes, typeRecord, entryNames, acceptsMethod = () => true) {
   const visited = new Set([typeRecord]);
   let frontier = parentTypes(indexes, typeRecord).filter((parent) => !visited.has(parent));
   while (frontier.length) {
     for (const parent of frontier) visited.add(parent);
     const entries = frontier.flatMap((parent) => entryNames.flatMap((name) => methodsNamed(indexes, parent.node.id, name)
+      .filter(acceptsMethod)
       .map((method) => ({ method, owner: parent }))));
     if (entries.length) return entries;
     frontier = frontier
@@ -162,15 +295,30 @@ function procedureCandidates(indexes, name) {
   return { exact: false, records: indexes.proceduresByShort.get(short) ?? [] };
 }
 
+function routeTargetResolution(routeTarget, routeId) {
+  let resolution = routeTarget.resolutionByRouteId.get(routeId);
+  if (!resolution) {
+    resolution = {
+      mappedTypeIds: new Set(),
+      mappingEdgeIds: new Set(),
+      dispatchedMethodIds: new Set(),
+      dispatchEdgeIds: new Set(),
+    };
+    routeTarget.resolutionByRouteId.set(routeId, resolution);
+  }
+  return resolution;
+}
+
 export function resolveFacts(graph, facts) {
   const indexes = buildResolverIndexes(graph, facts);
 
   for (const routeTarget of facts.routeTargets) {
+    routeTarget.resolutionByRouteId = new Map();
     const routePattern = routeTarget.routeNode.name;
     const mappedRoutes = routePattern === routePattern.replace(/\*+$/, "")
       ? indexes.routesByExactName.get(routePattern) ?? []
       : indexes.routeNodes.filter((node) => routeMatches(routePattern, node.name));
-    const directTargetTypes = candidatesForType(indexes, routeTarget.targetClass);
+    const directTargetTypes = routeCandidatesForType(indexes, routeTarget.targetClass);
     const springBeans = directTargetTypes.length === 0
       ? indexes.springBeansById.get(routeTarget.targetClass) ?? []
       : [];
@@ -178,7 +326,7 @@ export function resolveFacts(graph, facts) {
     const ambiguousSpringBean = springClasses.length > 1;
     const springBean = springClasses.length === 1 ? springBeans[0] : null;
     const resolvedTargetClass = springBean?.className ?? routeTarget.targetClass;
-    const targetTypes = candidatesForType(indexes, resolvedTargetClass);
+    const targetTypes = routeCandidatesForType(indexes, resolvedTargetClass);
     if (ambiguousSpringBean) {
       graph.addWarning(`ambiguous Spring bean route target: ${routeTarget.routeNode.name} -> ${routeTarget.targetClass}`);
     }
@@ -187,7 +335,8 @@ export function resolveFacts(graph, facts) {
     }
     for (const targetType of targetTypes) {
       for (const mappedRoute of mappedRoutes) {
-        graph.addEdge({
+        const resolution = routeTargetResolution(routeTarget, mappedRoute.id);
+        const mappingEdge = graph.addEdge({
           source: mappedRoute.id,
           target: targetType.node.id,
           type: "maps_to",
@@ -195,12 +344,35 @@ export function resolveFacts(graph, facts) {
           reason: springBean ? `${routeTarget.source} via Spring bean ${routeTarget.targetClass}` : routeTarget.source,
           evidence: [routeTarget.evidence, ...springBeans.flatMap((bean) => bean.node.evidence ?? []), ...mappedRoute.evidence, ...targetType.node.evidence],
         });
+        resolution.mappedTypeIds.add(targetType.node.id);
+        resolution.mappingEdgeIds.add(mappingEdge.id);
         const hints = mappedRoute.data.requestHints ?? [];
         const requestedMethods = routeTarget.dispatchParameter
           ? hints.map((hint) => hint.parameters?.[routeTarget.dispatchParameter]).filter((value) => value && !value.includes("${"))
           : [];
-        let entryNames = routeTarget.dispatchMethodExplicit ? [routeTarget.dispatchMethod] : [...new Set(requestedMethods)];
-        let dispatchReason = routeTarget.dispatchMethodExplicit
+        const dynamicMethods = routeTarget.framework === "struts2"
+          ? hints.map((hint) => hint.dispatchMethod).filter((value) => typeof value === "string" && value)
+          : [];
+        const hasOrdinaryStruts2Request = routeTarget.framework === "struts2"
+          && dynamicMethods.length > 0
+          && hints.some((hint) => typeof hint.dispatchMethod !== "string" || !hint.dispatchMethod);
+        let entryNames = dynamicMethods.length > 0
+          ? [...new Set([
+            ...dynamicMethods,
+            ...(hasOrdinaryStruts2Request
+              ? [routeTarget.dispatchMethodExplicit ? routeTarget.dispatchMethod : "execute"]
+              : []),
+          ])]
+          : routeTarget.dispatchMethodExplicit
+          ? [routeTarget.dispatchMethod]
+          : [...new Set(requestedMethods)];
+        let dispatchReason = dynamicMethods.length > 0
+          ? hasOrdinaryStruts2Request
+            ? routeTarget.dispatchMethodExplicit
+              ? "Struts 2 dynamic/configured method"
+              : "Struts 2 dynamic/default method"
+            : "Struts 2 dynamic method"
+          : routeTarget.dispatchMethodExplicit
           ? "Struts 2 action method"
           : routeTarget.dispatchParameter ? `Struts parameter ${routeTarget.dispatchParameter}` : "";
         if (entryNames.length === 0 && routeTarget.source === "servlet") {
@@ -217,31 +389,43 @@ export function resolveFacts(graph, facts) {
           dispatchReason = "Spring legacy controller convention";
         }
         if (entryNames.length === 0 && routeTarget.source !== "servlet" && !/DispatchAction$/.test(targetType.extendsType)) {
-          entryNames = ["execute", "perform"];
+          entryNames = routeTarget.framework === "struts2" ? ["execute"] : ["execute", "perform"];
           dispatchReason = "Action entry convention";
         }
+        const acceptsEntryMethod = (method) => {
+          if (routeTarget.framework === "struts1") return isStruts1EntryMethod(method);
+          if (routeTarget.framework === "struts2") {
+            return method.visibility === "public" && method.arity === 0;
+          }
+          return true;
+        };
         const directEntryMethods = entryNames.flatMap((name) => methodsNamed(indexes, targetType.node.id, name)
-          .map((method) => ({ method, owner: targetType })));
-        const inheritedEntries = directEntryMethods.length > 0
-          ? []
-          : inheritedEntryMethods(indexes, targetType, entryNames);
-        const entryMethods = directEntryMethods.length > 0 ? directEntryMethods : inheritedEntries;
-        if (inheritedEntries.length > 0) {
-          dispatchReason = `Inherited ${dispatchReason}`;
-        }
+          .filter(acceptsEntryMethod)
+          .map((method) => ({ method, owner: targetType, inherited: false })));
+        const directEntryNames = new Set(directEntryMethods.map((entry) => entry.method.name));
+        const inheritedEntries = entryNames
+          .filter((name) => !directEntryNames.has(name))
+          .flatMap((name) => inheritedEntryMethods(indexes, targetType, [name], acceptsEntryMethod)
+            .map((entry) => ({ ...entry, inherited: true })));
+        const entryMethods = [...directEntryMethods, ...inheritedEntries];
         for (const entry of entryMethods) {
           const entryMethod = entry.method;
-          graph.addEdge({
+          const entryDispatchReason = entry.inherited ? `Inherited ${dispatchReason}` : dispatchReason;
+          const dispatchEdge = graph.addEdge({
             source: mappedRoute.id,
             target: entryMethod.node.id,
             type: "dispatches_to",
-            confidence: requestedMethods.includes(entryMethod.name) || routeTarget.dispatchMethodExplicit ? 1 : 0.9,
-            reason: dispatchReason,
+            confidence: requestedMethods.includes(entryMethod.name)
+              || dynamicMethods.includes(entryMethod.name)
+              || routeTarget.dispatchMethodExplicit ? 1 : 0.9,
+            reason: entryDispatchReason,
             evidence: [routeTarget.evidence, ...mappedRoute.evidence, ...entryMethod.node.evidence],
           });
-          if (inheritedEntries.length > 0) {
+          resolution.dispatchedMethodIds.add(entryMethod.node.id);
+          resolution.dispatchEdgeIds.add(dispatchEdge.id);
+          if (entry.inherited) {
             for (const handler of inheritedTemplateHandlers(indexes, targetType, entry)) {
-              graph.addEdge({
+              const handlerEdge = graph.addEdge({
                 source: mappedRoute.id,
                 target: handler.method.node.id,
                 type: "dispatches_to",
@@ -255,6 +439,8 @@ export function resolveFacts(graph, facts) {
                   ...handler.method.node.evidence,
                 ],
               });
+              resolution.dispatchedMethodIds.add(handler.method.node.id);
+              resolution.dispatchEdgeIds.add(handlerEdge.id);
             }
           }
         }
@@ -306,7 +492,7 @@ export function resolveFacts(graph, facts) {
   for (const javaFile of facts.javaFiles) {
     for (const implementation of javaFile.types) {
       for (const declaredInterface of implementation.implementsTypes) {
-        const contracts = candidatesForType(indexes, declaredInterface, javaFile);
+        const contracts = headerTypeCandidates(indexes, declaredInterface, implementation);
         for (const contract of contracts) {
           const relationConfidence = contracts.length === 1 ? 1 : 0.5;
           const relationReason = contracts.length === 1 ? "Java implements declaration" : "ambiguous simple-name implements declaration";
@@ -373,11 +559,12 @@ export function resolveFacts(graph, facts) {
           indexes,
           provider.method.returnType,
           indexes.javaFileByTypeRecord.get(provider.owner),
+          provider.owner,
         ).flatMap((type) => methodsNamed(indexes, type.node.id, call.method)));
         let targets = call.receiverMethod
           ? methodReturnTargets
           : receiverType
-            ? candidatesForType(indexes, receiverType, javaFile).flatMap((type) => methodsNamed(indexes, type.node.id, call.method))
+            ? candidatesForType(indexes, receiverType, javaFile, ownerType).flatMap((type) => methodsNamed(indexes, type.node.id, call.method))
             : [];
         let confidence = 0.9;
         let reason = call.receiverMethod && returnProviders.length > 0

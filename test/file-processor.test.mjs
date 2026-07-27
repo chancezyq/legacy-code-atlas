@@ -48,6 +48,118 @@ test("JavaScript parser changes invalidate stale request-method cache records", 
   assert.equal(result.record.facts.requests[0].method, "");
 });
 
+test("Java parser changes invalidate stale action-result cache records", async () => {
+  const buffer = Buffer.from([
+    "class SaveAction {",
+    "  String execute() { return \"success\"; }",
+    "}",
+  ].join("\n"));
+  const file = source("src/SaveAction.java", "java", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.4.2";
+  delete staleRecord.facts.methods[0].returnedResults;
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.deepEqual(result.record.facts.methods[0].returnedResults.map(({ name, kind }) => [name, kind]), [
+    ["success", "string-literal"],
+  ]);
+});
+
+test("Java canonical-name changes invalidate stale parser cache records", async () => {
+  const buffer = Buffer.from([
+    "package com.acme;",
+    "class Container { static class Service {} }",
+  ].join("\n"));
+  const file = source("src/com/acme/Container.java", "java", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.4.5";
+  for (const type of staleRecord.facts.types) delete type.canonicalName;
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.deepEqual(
+    result.record.facts.types.map(({ canonicalName }) => canonicalName),
+    ["com.acme.Container", "com.acme.Container.Service"],
+  );
+});
+
+test("Java method-visibility changes invalidate stale parser cache records", async () => {
+  const buffer = Buffer.from([
+    "class SaveAction {",
+    '  private String execute() { return "success"; }',
+    "}",
+  ].join("\n"));
+  const file = source("src/SaveAction.java", "java", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.4.6";
+  delete staleRecord.facts.methods[0].visibility;
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.equal(result.record.facts.methods[0].visibility, "private");
+});
+
+test("JSP select option changes invalidate stale runtime-value cache records", async () => {
+  const buffer = Buffer.from('<form action="/order.do"><select name="status"><option selected><c:out value="${status}"/></option></select></form>');
+  const file = source("web/edit.jsp", "jsp", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.5.8";
+  delete staleRecord.facts.requests[0].runtimeValueParameterNames;
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.deepEqual(result.record.facts.requests[0].runtimeValueParameterNames, ["status"]);
+});
+
+test("JSP dynamic query changes invalidate stale static-route cache records", async () => {
+  const buffer = Buffer.from('<form action="/orders.do?id=<%= bean.getId() %>"></form>');
+  const file = source("web/edit.jsp", "jsp", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.5.9";
+  staleRecord.facts.requests = [];
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.equal(result.record.facts.requests[0].url, "/orders.do");
+  assert.deepEqual(result.record.facts.requests[0].parameters, { id: "" });
+});
+
 test("readAndProcessFile returns metadata facts without reading or stating the file", async () => {
   const file = source("docs/README.md", "markdown", "hello", { category: "docs" });
   let ioCalls = 0;

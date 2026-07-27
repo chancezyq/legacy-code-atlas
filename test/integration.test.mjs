@@ -486,7 +486,7 @@ test("user documentation describes the true Skill-only runtime and one-time lega
   }
 
   for (const guide of documents.slice(2)) {
-    assert.match(guide, /70 pass/);
+    assert.match(guide, /91 pass/);
     assert.match(guide, /0 skip/);
     assert.match(guide, /(?:不代表|does not claim|not evidence)/i);
   }
@@ -591,7 +591,7 @@ test("OpenCode guide defines the real Windows release gate", async () => {
   const releaseGate = markdownSection(docs, "真实 Windows 发布门禁");
 
   assert.match(releaseGate, /npm run test:installer:windows/);
-  assert.match(releaseGate, /70 pass/);
+  assert.match(releaseGate, /91 pass/);
   assert.match(releaseGate, /0 skip/);
   assert.match(releaseGate, /真实 Windows/);
   assert.match(releaseGate, /非 Windows[^\n]+skip/);
