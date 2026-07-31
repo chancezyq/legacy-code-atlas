@@ -1247,6 +1247,125 @@ test("Struts 2 literal returns confirm only the matching configured result", () 
   );
 });
 
+test("Struts 2 ignores configured result names and declarations embedded in Java text blocks", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/ReviewAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class ReviewAction {",
+          '  private static final String SAMPLE = """',
+          "    class Fake {",
+          "    public String fake() {",
+          '    return "success";',
+          '    """;',
+          '  public String save() { return "error"; }',
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/review'>",
+          "  <action name='save' class='com.acme.ReviewAction' method='save'>",
+          "    <result name='success'>/review/success.jsp</result>",
+          "    <result name='error'>/review/error.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record("web/review/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/review/error.jsp", "jsp", "<p>Error</p>", "markup"),
+    ],
+  });
+
+  const success = edge(
+    graph,
+    "route:/review/save.action",
+    "forwards_to",
+    "page:web/review/success.jsp",
+  );
+  const error = edge(
+    graph,
+    "route:/review/save.action",
+    "forwards_to",
+    "page:web/review/error.jsp",
+  );
+  assert.deepEqual(success.data.outcome, {
+    framework: "struts2",
+    name: "success",
+    classification: "configured-candidate",
+    codeEvidence: [],
+  });
+  assert.equal(error.data.outcome.classification, "code-confirmed");
+  assert.deepEqual(error.data.outcome.codeEvidence.map(({ line }) => line), [8]);
+});
+
+test("Struts 2 ignores configured result names returned by Unicode-escaped lambdas", () => {
+  const escapedMinus = String.raw`\u002d`;
+  const graph = materializeRecords({
+    projectRoot,
+    records: [
+      record(
+        "src/com/acme/ReviewAction.java",
+        "java",
+        [
+          "package com.acme;",
+          "public class ReviewAction {",
+          "  public String save() {",
+          `    java.util.function.Supplier<String> fake = () ${escapedMinus}> {`,
+          '      return "success";',
+          "    };",
+          '    return "error";',
+          "  }",
+          "}",
+        ].join("\n"),
+      ),
+      record(
+        "WEB-INF/struts.xml",
+        "xml",
+        [
+          "<struts><package namespace='/review'>",
+          "  <action name='save' class='com.acme.ReviewAction' method='save'>",
+          "    <result name='success'>/review/success.jsp</result>",
+          "    <result name='error'>/review/error.jsp</result>",
+          "  </action>",
+          "</package></struts>",
+        ].join("\n"),
+        "config",
+      ),
+      record("web/review/success.jsp", "jsp", "<p>Saved</p>", "markup"),
+      record("web/review/error.jsp", "jsp", "<p>Error</p>", "markup"),
+    ],
+  });
+
+  const success = edge(
+    graph,
+    "route:/review/save.action",
+    "forwards_to",
+    "page:web/review/success.jsp",
+  );
+  const error = edge(
+    graph,
+    "route:/review/save.action",
+    "forwards_to",
+    "page:web/review/error.jsp",
+  );
+  assert.deepEqual(success.data.outcome, {
+    framework: "struts2",
+    name: "success",
+    classification: "configured-candidate",
+    codeEvidence: [],
+  });
+  assert.equal(error.data.outcome.classification, "code-confirmed");
+  assert.deepEqual(error.data.outcome.codeEvidence.map(({ line }) => line), [7]);
+});
+
 test("a Spring controller sharing a route cannot confirm an unresolved Struts outcome", () => {
   const graph = materializeRecords({
     projectRoot,

@@ -24,11 +24,21 @@ function lowerBound(values, target) {
   return low;
 }
 
-export function createEvidenceLocator(content, filePath) {
+export function createEvidenceLocator(content, filePath, {
+  recognizeBareCarriageReturns = false,
+} = {}) {
   const normalizedFilePath = normalizePath(filePath);
   const newlineOffsets = [];
-  for (let offset = content.indexOf("\n"); offset !== -1; offset = content.indexOf("\n", offset + 1)) {
-    newlineOffsets.push(offset);
+  if (recognizeBareCarriageReturns) {
+    for (let offset = 0; offset < content.length; offset += 1) {
+      if (content[offset] === "\n" || (content[offset] === "\r" && content[offset + 1] !== "\n")) {
+        newlineOffsets.push(offset);
+      }
+    }
+  } else {
+    for (let offset = content.indexOf("\n"); offset !== -1; offset = content.indexOf("\n", offset + 1)) {
+      newlineOffsets.push(offset);
+    }
   }
 
   return {

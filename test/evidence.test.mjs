@@ -75,6 +75,28 @@ test("offsetAt treats CR as a column character and LF as the line boundary", () 
   assert.equal(locator.offsetAt(2, 5), content.length);
 });
 
+test("evidence locator can treat bare CR as a line boundary without splitting CRLF twice", () => {
+  const content = "one\rnext\r\nlast";
+  const locator = createEvidenceLocator(content, "Evidence.java", {
+    recognizeBareCarriageReturns: true,
+  });
+
+  assert.deepEqual(locator.at(content.indexOf("next")), {
+    file: "Evidence.java",
+    line: 2,
+    column: 1,
+    snippet: "next",
+  });
+  assert.deepEqual(locator.at(content.indexOf("last")), {
+    file: "Evidence.java",
+    line: 3,
+    column: 1,
+    snippet: "last",
+  });
+  assert.equal(locator.offsetAt(2, 1), content.indexOf("next"));
+  assert.equal(locator.offsetAt(3, 1), content.indexOf("last"));
+});
+
 test("offsetAt accepts the only source position in an empty file", () => {
   const locator = createEvidenceLocator("", "Empty.java");
 
@@ -140,8 +162,11 @@ test("parser source structure reuses one locator per top-level source", async ()
   ].map((fileName) => readFile(new URL(`../src/parsers/${fileName}`, import.meta.url), "utf8")));
   const occurrenceCount = (source, value) => source.split(value).length - 1;
 
-  assert.equal(occurrenceCount(javaSource, "createEvidenceLocator(content, filePath)"), 1);
-  assert.match(javaSource, /const locator = createEvidenceLocator\(content, filePath\);/);
+  assert.equal(occurrenceCount(javaSource, "createEvidenceLocator(content, filePath,"), 1);
+  assert.match(
+    javaSource,
+    /const locator = createEvidenceLocator\(content, filePath, \{\s*recognizeBareCarriageReturns: true,?\s*\}\);/u,
+  );
 
   assert.equal(occurrenceCount(jspSource, "createEvidenceLocator(content, filePath)"), 2);
   assert.match(jspSource, /locator = createEvidenceLocator\(content, filePath\)/);

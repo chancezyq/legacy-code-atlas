@@ -121,6 +121,43 @@ test("Java method-visibility changes invalidate stale parser cache records", asy
   assert.equal(result.record.facts.methods[0].visibility, "private");
 });
 
+test("Java text-block masking changes invalidate stale parser cache records", async () => {
+  const buffer = Buffer.from([
+    "class SaveAction {",
+    "  String execute() {",
+    '    String sample = """',
+    '      return "success";',
+    '      """;',
+    '    return "error";',
+    "  }",
+    "}",
+  ].join("\n"));
+  const file = source("src/SaveAction.java", "java", buffer);
+  const staleRecord = parseFileBuffer(file, buffer);
+  staleRecord.parserVersion = "1.4.7";
+  staleRecord.facts.methods[0].returnedResults = [{
+    name: "success",
+    kind: "string-literal",
+    evidence: {
+      file: "src/SaveAction.java",
+      line: 4,
+      column: 7,
+      snippet: 'return "success";',
+    },
+  }];
+
+  const result = await readAndProcessFile(file, {
+    cached: { fingerprint: sha256(buffer), record: staleRecord },
+    io: {
+      readFile: async () => buffer,
+      stat: async () => ({ size: buffer.length, mtimeMs: 100 }),
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.deepEqual(result.record.facts.methods[0].returnedResults.map(({ name }) => name), ["error"]);
+});
+
 test("JSP select option changes invalidate stale runtime-value cache records", async () => {
   const buffer = Buffer.from('<form action="/order.do"><select name="status"><option selected><c:out value="${status}"/></option></select></form>');
   const file = source("web/edit.jsp", "jsp", buffer);

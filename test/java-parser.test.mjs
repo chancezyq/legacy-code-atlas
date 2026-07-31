@@ -2,11 +2,17 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { parseJava } from "../src/parsers/java.mjs";
+import { parseJava, stripJavaComments } from "../src/parsers/java.mjs";
 
 async function javaFixture(relativePath) {
   return readFile(new URL(`./fixtures/legacy-shop/src/${relativePath}`, import.meta.url), "utf8");
 }
+
+test("Java comment stripping preserves non-line Unicode escapes in string literals", () => {
+  const content = String.raw`class Sample { String value = "\u0061"; }`;
+
+  assert.equal(stripJavaComments(content), content);
+});
 
 test("Java parser extracts package, type, inheritance, fields, methods, and calls", async () => {
   const content = await javaFixture("com/acme/order/web/OrderAuditAction.java");
@@ -150,6 +156,330 @@ test("Java parser records only direct literal action results in their innermost 
         }],
       },
     ],
+  );
+});
+
+test("Java parser ignores literal returns inside text blocks", () => {
+  const result = parseJava([
+    "package com.acme;",
+    "public class ReviewAction {",
+    "  public String save() {",
+    '    String sample = """',
+    '      "',
+    '      return "success";',
+    '      """;',
+    '    // return "commented";',
+    '    return "error";',
+    "  }",
+    "}",
+  ].join("\n"), "src/com/acme/ReviewAction.java");
+
+  assert.deepEqual(result.methods[0].returnedResults, [{
+    name: "error",
+    kind: "string-literal",
+    evidence: {
+      file: "src/com/acme/ReviewAction.java",
+      line: 9,
+      column: 5,
+      snippet: 'return "error";',
+    },
+  }]);
+});
+
+test("Java parser treats declarations and framework calls inside text blocks as inert data", () => {
+  const result = parseJava([
+    "public class ReviewAction {",
+    '  private static final String SAMPLE = """',
+    "    package com.fake;",
+    "    import com.fake.Hidden;",
+    "    class Fake {",
+    "    public String fake() {",
+    "    private Helper leakedField;",
+    '    static final String LEAKED = "fake.statement";',
+    '    sqlMap.queryForObject("fake.select");',
+    '    return "success";',
+    '    """;',
+    '  public String save() { return "error"; }',
+    "}",
+  ].join("\n"), "src/ReviewAction.java");
+
+  assert.equal(result.packageName, "");
+  assert.deepEqual(result.imports, []);
+  assert.deepEqual(result.types.map(({ name }) => name), ["ReviewAction"]);
+  assert.deepEqual(result.fields.map(({ name }) => name), ["SAMPLE"]);
+  assert.deepEqual(result.methods.map(({ name }) => name), ["save"]);
+  assert.deepEqual(result.stringConstants, []);
+  assert.deepEqual(result.statementUses, []);
+  assert.deepEqual(
+    result.methods[0].returnedResults.map(({ name, evidence }) => [name, evidence.line]),
+    [["error", 12]],
+  );
+});
+
+test("Java parser applies Unicode escapes before recognizing text block delimiters", () => {
+  const delimiter = String.raw`\u0022\u0022\u0022`;
+  const result = parseJava([
+    "class ReviewAction {",
+    "  String save() {",
+    `    String sample = ${delimiter}`,
+    '      return "fake";',
+    `      ${delimiter};`,
+    '    return "real";',
+    "  }",
+    "}",
+  ].join("\n"), "src/ReviewAction.java");
+
+  assert.deepEqual(result.methods[0].returnedResults.map(({ name }) => name), ["real"]);
+});
+
+test("Java parser ends line comments at CR-only line terminators", () => {
+  const result = parseJava([
+    "class ReviewAction {",
+    "  String save() {",
+    "    // ignored",
+    '    return "real";',
+    "  }",
+    "}",
+  ].join("\r"), "src/ReviewAction.java");
+
+  assert.deepEqual(result.methods[0].returnedResults, [{
+    name: "real",
+    kind: "string-literal",
+    evidence: {
+      file: "src/ReviewAction.java",
+      line: 4,
+      column: 5,
+      snippet: 'return "real";',
+    },
+  }]);
+});
+
+test("Java parser preserves Unicode-escaped line terminators when ending line comments", () => {
+  for (const escapedTerminator of [String.raw`\u000a`, String.raw`\u000d`]) {
+    const result = parseJava([
+      `class ReviewAction { // ignored ${escapedTerminator}  public String save() { return "real"; }`,
+      "}",
+    ].join("\n"), "src/ReviewAction.java");
+
+    assert.deepEqual(result.methods.map(({ name }) => name), ["save"], escapedTerminator);
+    assert.deepEqual(
+      result.methods[0].returnedResults.map(({ name }) => name),
+      ["real"],
+      escapedTerminator,
+    );
+  }
+});
+
+test("Java parser preserves consecutive logical line terminators after line comments", () => {
+  for (const logicalTerminators of [
+    String.raw`\u000d\u000a`,
+    String.raw`\u000a\u000d`,
+    `\r${String.raw`\u000a`}`,
+    `${String.raw`\u000a`}\r`,
+  ]) {
+    const result = parseJava([
+      `class ReviewAction { // ignored ${logicalTerminators}  public String save() { return "real"; }`,
+      "}",
+    ].join("\n"), "src/ReviewAction.java");
+
+    assert.deepEqual(result.methods.map(({ name }) => name), ["save"]);
+  }
+});
+
+test("Java parser materializes Unicode-escaped line terminators in code", () => {
+  for (const escapedTerminator of [String.raw`\u000a`, String.raw`\u000d`]) {
+    const result = parseJava([
+      `class ReviewAction { ${escapedTerminator}  public String save() { return "real"; }`,
+      "}",
+    ].join("\n"), "src/ReviewAction.java");
+
+    assert.deepEqual(result.methods.map(({ name }) => name), ["save"], escapedTerminator);
+  }
+});
+
+test("Java parser keeps a raw backslash eligible after a Unicode escape", () => {
+  const escapedBackslashAndLineFeed = String.raw`\u005c\u000a`;
+  const result = parseJava([
+    "class ReviewAction {",
+    "  String save() {",
+    `    // ignored ${escapedBackslashAndLineFeed}    return "real";`,
+    "  }",
+    "}",
+  ].join("\n"), "src/ReviewAction.java");
+
+  assert.deepEqual(result.methods[0].returnedResults.map(({ name }) => name), ["real"]);
+});
+
+test("Java parser excludes Unicode-produced backslashes from later raw backslash parity", () => {
+  const escapedBackslashTwoRawBackslashesAndLineFeed = String.raw`\u005c\\u000a`;
+  const result = parseJava([
+    "class ReviewAction {",
+    "  String save() {",
+    `    // ignored ${escapedBackslashTwoRawBackslashesAndLineFeed}    return "commented";`,
+    "  }",
+    "}",
+  ].join("\n"), "src/ReviewAction.java");
+
+  assert.deepEqual(result.methods[0].returnedResults, []);
+});
+
+test("Java parser translates an escape after three raw backslashes following a Unicode escape", () => {
+  const escapedBackslashThreeRawBackslashesAndLineFeed = String.raw`\u005c\\\u000a`;
+  const result = parseJava([
+    "class ReviewAction {",
+    "  String save() {",
+    `    // ignored ${escapedBackslashThreeRawBackslashesAndLineFeed}    return "real";`,
+    "  }",
+    "}",
+  ].join("\n"), "src/ReviewAction.java");
+
+  assert.deepEqual(result.methods[0].returnedResults.map(({ name }) => name), ["real"]);
+});
+
+test("Java parser applies Unicode-escaped braces before assigning local-class returns", () => {
+  const openBrace = String.raw`\u007b`;
+  const closeBrace = String.raw`\u007d`;
+  const content = [
+    "class ResultAction {",
+    "  String save() {",
+    `    class Local ${openBrace}`,
+    `      String fake() ${openBrace} return "success"; ${closeBrace}`,
+    `    ${closeBrace}`,
+    '    return "error";',
+    "  }",
+    "}",
+  ].join("\n");
+  const result = parseJava(content, "src/ResultAction.java");
+
+  const save = result.methods.find((method) => method.name === "save");
+  const fake = result.methods.find((method) => method.name === "fake");
+  const local = result.types.find((type) => type.name === "Local");
+  const openOffsets = [...content.matchAll(/\\u007b/g)].map((match) => match.index);
+  const closeOffsets = [...content.matchAll(/\\u007d/g)].map((match) => match.index);
+  assert.deepEqual(save.returnedResults.map(({ name }) => name), ["error"]);
+  assert.equal(local.bodyStart, openOffsets[0]);
+  assert.equal(local.bodyEnd, closeOffsets[1]);
+  assert.equal(fake.bodyStart, openOffsets[1]);
+  assert.equal(fake.bodyEnd, closeOffsets[0]);
+});
+
+test("Java parser keeps Unicode-produced backslashes adjacent to escaped string quotes", () => {
+  const escapedBackslash = String.raw`\u005c`;
+  const result = parseJava([
+    "class ResultAction {",
+    "  String save() {",
+    `    String sample = "${escapedBackslash}" return ${escapedBackslash}"fake${escapedBackslash}";";`,
+    '    return "real";',
+    "  }",
+    "}",
+  ].join("\n"), "src/ResultAction.java");
+
+  const save = result.methods.find((method) => method.name === "save");
+  assert.deepEqual(save.returnedResults.map(({ name }) => name), ["real"]);
+});
+
+test("Java parser applies Unicode escapes inside local-class keywords", () => {
+  const escapedClass = String.raw`\u0063lass`;
+  const content = [
+    "class ResultAction {",
+    "  String save() {",
+    String.raw`    String marker = "\u0061";`,
+    `    ${escapedClass} Local {`,
+    '      String fake() { return "success"; }',
+    "    }",
+    '    return "error";',
+    "  }",
+    "}",
+  ].join("\n");
+  const result = parseJava(content, "src/ResultAction.java");
+
+  const save = result.methods.find((method) => method.name === "save");
+  const fake = result.methods.find((method) => method.name === "fake");
+  const local = result.types.find((type) => type.name === "Local");
+  assert.deepEqual(save.returnedResults.map(({ name }) => name), ["error"]);
+  assert.equal(local.fullName, `ResultAction$local$Local$${content.indexOf(escapedClass)}`);
+  assert.equal(fake.ownerType, local.fullName);
+});
+
+test("Java parser does not recursively translate Unicode-produced backslashes", () => {
+  const producedBackslash = String.raw`\u005c`;
+  const result = parseJava([
+    "class ResultAction {",
+    "  String save() {",
+    `    // ignored ${producedBackslash}u000a return "fake";`,
+    `    ${producedBackslash}u0063lass Fake {}`,
+    '    return "real";',
+    "  }",
+    "}",
+  ].join("\n"), "src/ResultAction.java");
+
+  assert.deepEqual(result.types.map(({ name }) => name), ["ResultAction"]);
+  assert.deepEqual(result.methods[0].returnedResults.map(({ name }) => name), ["real"]);
+});
+
+test("Java parser maps translated offsets back to raw evidence locations", () => {
+  const escapedSpace = String.raw`\u0020`;
+  const content = [
+    `${escapedSpace}package com.acme;`,
+    "public class EvidenceAction {",
+    "  private SqlMapClient sqlMap;",
+    "  private Helper helper;",
+    "  String save() {",
+    "    Helper local;",
+    "    helper.finish();",
+    "    getHelper().finish();",
+    '    sqlMap.update("real.update");',
+    '    return "success";',
+    "  }",
+    "}",
+  ].join("\n");
+  const result = parseJava(content, "src/EvidenceAction.java");
+  const save = result.methods.find((method) => method.name === "save");
+  const directCall = result.calls.find((call) => call.receiver === "helper");
+  const methodReturnCall = result.calls.find((call) => call.receiverMethod === "getHelper");
+
+  assert.deepEqual(
+    [
+      result.types[0].evidence,
+      result.fields[0].evidence,
+      save.evidence,
+      save.returnedResults[0].evidence,
+      result.localVariables[0].evidence,
+      directCall.evidence,
+      methodReturnCall.evidence,
+      result.statementUses[0].evidence,
+    ].map(({ line, column, snippet }) => [line, column, snippet]),
+    [
+      [2, 8, "public class EvidenceAction {"],
+      [3, 1, "private SqlMapClient sqlMap;"],
+      [5, 1, "String save() {"],
+      [10, 5, 'return "success";'],
+      [6, 5, "Helper local;"],
+      [7, 5, "helper.finish();"],
+      [8, 5, "getHelper().finish();"],
+      [9, 12, 'sqlMap.update("real.update");'],
+    ],
+  );
+});
+
+test("Java parser applies Unicode escapes inside anonymous-class creation keywords", () => {
+  const escapedNew = String.raw`\u006eew`;
+  const result = parseJava([
+    "class ResultAction {",
+    "  private SqlMapClient sqlMap;",
+    "  String save() {",
+    `    Object helper = ${escapedNew} Object() {`,
+    '      { sqlMap.update("fake.update"); }',
+    "    };",
+    '    sqlMap.update("real.update");',
+    '    return "error";',
+    "  }",
+    "}",
+  ].join("\n"), "src/ResultAction.java");
+
+  assert.deepEqual(
+    result.statementUses.map(({ statementId, enclosingMethod }) => [statementId, enclosingMethod]),
+    [["real.update", "save"]],
   );
 });
 

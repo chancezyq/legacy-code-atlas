@@ -23,74 +23,213 @@ const TYPE_DECLARATION_MODIFIERS = new Set([
   "strictfp",
 ]);
 
-function blankCharacter(character) {
-  return character === "\n" || character === "\r" ? character : " ";
+function javaUnicodeEscapes(content) {
+  const escapes = new Map();
+  let backslashRun = 0;
+  let previousFromUnicodeEscape = false;
+  for (let index = 0; index < content.length;) {
+    if (content[index] !== "\\") {
+      backslashRun = 0;
+      previousFromUnicodeEscape = false;
+      index += 1;
+      continue;
+    }
+
+    let hexStart = index + 1;
+    const eligible = previousFromUnicodeEscape || backslashRun % 2 === 0;
+    if (eligible && content[hexStart] === "u") {
+      while (content[hexStart] === "u") hexStart += 1;
+      const hex = content.slice(hexStart, hexStart + 4);
+      if (/^[0-9A-Fa-f]{4}$/.test(hex)) {
+        const character = String.fromCharCode(Number.parseInt(hex, 16));
+        const length = hexStart + 4 - index;
+        escapes.set(index, { character, length });
+        backslashRun = 0;
+        previousFromUnicodeEscape = true;
+        index += length;
+        continue;
+      }
+    }
+
+    backslashRun += 1;
+    previousFromUnicodeEscape = false;
+    index += 1;
+  }
+  return escapes;
 }
 
-export function stripJavaComments(content) {
+function textBlockDelimiterLength(content, escapes, index) {
+  let cursor = index;
+  for (let count = 0; count < 3; count += 1) {
+    const escape = escapes.get(cursor);
+    const character = escape?.character ?? content[cursor];
+    if (character !== '"') return 0;
+    cursor += escape?.length ?? 1;
+  }
+  return cursor - index;
+}
+
+function sourceSpan(content, index, length, translatedCharacter = "") {
+  const span = content.slice(index, index + length);
+  if ((translatedCharacter === "\n" || translatedCharacter === "\r") && length > 1) {
+    return translatedCharacter + " ".repeat(length - 1);
+  }
+  return span;
+}
+
+function blankSpan(content, index, length, translatedCharacter = "") {
+  return sourceSpan(content, index, length, translatedCharacter).replace(/[^\r\n]/g, " ");
+}
+
+function translateJavaUnicodeSource(content) {
+  const unicodeEscapes = javaUnicodeEscapes(content);
+  if (unicodeEscapes.size === 0) return { source: content, rawOffsets: null };
+  const rawOffsets = [];
+  let source = "";
+  for (let rawOffset = 0; rawOffset < content.length;) {
+    rawOffsets.push(rawOffset);
+    const escape = unicodeEscapes.get(rawOffset);
+    if (escape) {
+      source += escape.character;
+      rawOffset += escape.length;
+    } else {
+      source += content[rawOffset];
+      rawOffset += 1;
+    }
+  }
+  rawOffsets.push(content.length);
+  return { source, rawOffsets };
+}
+
+function stripJavaCommentsWithEscapes(content, unicodeEscapes) {
   let output = "";
   let state = "code";
   for (let index = 0; index < content.length; index += 1) {
-    const character = content[index];
-    const next = content[index + 1];
+    const escape = unicodeEscapes.get(index);
+    const character = escape?.character ?? content[index];
+    const length = escape?.length ?? 1;
+    const nextIndex = index + length;
+    const nextEscape = unicodeEscapes.get(nextIndex);
+    const next = nextEscape?.character ?? content[nextIndex];
+    const nextLength = nextEscape?.length ?? 1;
     if (state === "code") {
+      const delimiterLength = textBlockDelimiterLength(content, unicodeEscapes, index);
       if (character === "/" && next === "/") {
-        output += "  ";
-        index += 1;
+        const commentStartLength = length + nextLength;
+        output += blankSpan(content, index, commentStartLength);
+        index += commentStartLength - 1;
         state = "line-comment";
       } else if (character === "/" && next === "*") {
-        output += "  ";
-        index += 1;
+        const commentStartLength = length + nextLength;
+        output += blankSpan(content, index, commentStartLength);
+        index += commentStartLength - 1;
         state = "block-comment";
+      } else if (delimiterLength > 0) {
+        output += content.slice(index, index + delimiterLength);
+        index += delimiterLength - 1;
+        state = "text-block";
       } else {
-        output += character;
+        output += sourceSpan(content, index, length, character);
         if (character === '"') state = "string";
         else if (character === "'") state = "character";
+        index += length - 1;
       }
     } else if (state === "line-comment") {
-      output += blankCharacter(character);
-      if (character === "\n") state = "code";
+      output += blankSpan(content, index, length, character);
+      if (character === "\n" || character === "\r") state = "code";
+      index += length - 1;
     } else if (state === "block-comment") {
       if (character === "*" && next === "/") {
-        output += "  ";
-        index += 1;
+        const commentEndLength = length + nextLength;
+        output += blankSpan(content, index, commentEndLength);
+        index += commentEndLength - 1;
         state = "code";
       } else {
-        output += blankCharacter(character);
+        output += blankSpan(content, index, length, character);
+        index += length - 1;
+      }
+    } else if (state === "text-block") {
+      const delimiterLength = textBlockDelimiterLength(content, unicodeEscapes, index);
+      if (delimiterLength > 0) {
+        output += content.slice(index, index + delimiterLength);
+        index += delimiterLength - 1;
+        state = "code";
+      } else if (character === "\\" && next !== undefined) {
+        output += sourceSpan(content, index, length, character);
+        output += sourceSpan(content, nextIndex, nextLength, next);
+        index += length + nextLength - 1;
+      } else {
+        output += sourceSpan(content, index, length, character);
+        index += length - 1;
       }
     } else {
-      output += character;
+      output += sourceSpan(content, index, length, character);
       if (character === "\\" && next !== undefined) {
-        output += next;
-        index += 1;
+        output += sourceSpan(content, nextIndex, nextLength, next);
+        index += length + nextLength - 1;
       } else if ((state === "string" && character === '"') || (state === "character" && character === "'")) {
         state = "code";
+        index += length - 1;
+      } else {
+        index += length - 1;
       }
     }
   }
   return output;
 }
 
-function maskJavaStrings(content) {
+export function stripJavaComments(content) {
+  return stripJavaCommentsWithEscapes(content, javaUnicodeEscapes(content));
+}
+
+const NO_JAVA_UNICODE_ESCAPES = new Map();
+
+function maskTranslatedJavaStrings(content) {
   let output = "";
-  let quote = "";
+  let state = "code";
+  const unicodeEscapes = NO_JAVA_UNICODE_ESCAPES;
   for (let index = 0; index < content.length; index += 1) {
-    const character = content[index];
-    if (!quote) {
-      if (character === '"' || character === "'") {
-        quote = character;
-        output += " ";
+    const escape = unicodeEscapes.get(index);
+    const character = escape?.character ?? content[index];
+    const length = escape?.length ?? 1;
+    const nextIndex = index + length;
+    const nextEscape = unicodeEscapes.get(nextIndex);
+    const next = nextEscape?.character ?? content[nextIndex];
+    const nextLength = nextEscape?.length ?? 1;
+    if (state === "code") {
+      const delimiterLength = textBlockDelimiterLength(content, unicodeEscapes, index);
+      if (delimiterLength > 0) {
+        output += blankSpan(content, index, delimiterLength);
+        index += delimiterLength - 1;
+        state = "text-block";
+      } else if (character === '"' || character === "'") {
+        state = character === '"' ? "string" : "character";
+        output += blankSpan(content, index, length, character);
+        index += length - 1;
       } else {
-        output += character;
+        output += sourceSpan(content, index, length, character);
+        index += length - 1;
       }
-    } else if (character === "\\" && content[index + 1] !== undefined) {
-      output += "  ";
-      index += 1;
-    } else if (character === quote) {
-      output += " ";
-      quote = "";
     } else {
-      output += blankCharacter(character);
+      const delimiterLength = state === "text-block"
+        ? textBlockDelimiterLength(content, unicodeEscapes, index)
+        : 0;
+      if (delimiterLength > 0) {
+        output += blankSpan(content, index, delimiterLength);
+        index += delimiterLength - 1;
+        state = "code";
+      } else if (character === "\\" && next !== undefined) {
+        output += blankSpan(content, index, length, character);
+        output += blankSpan(content, nextIndex, nextLength, next);
+        index += length + nextLength - 1;
+      } else if ((state === "string" && character === '"') || (state === "character" && character === "'")) {
+        output += blankSpan(content, index, length, character);
+        index += length - 1;
+        state = "code";
+      } else {
+        output += blankSpan(content, index, length, character);
+        index += length - 1;
+      }
     }
   }
   return output;
@@ -487,16 +626,25 @@ function isIbatisInvocation(source, offset, ownerType, fields) {
 }
 
 export function parseJava(content, filePath) {
-  const locator = createEvidenceLocator(content, filePath);
-  const source = stripJavaComments(content);
-  const masked = maskJavaStrings(source);
-  const packageName = source.match(/\bpackage\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;/)?.[1] ?? "";
-  const imports = [...source.matchAll(/\bimport\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$*][\w$*]*)*)\s*;/g)]
+  const locator = createEvidenceLocator(content, filePath, {
+    recognizeBareCarriageReturns: true,
+  });
+  const translated = translateJavaUnicodeSource(content);
+  const source = stripJavaCommentsWithEscapes(translated.source, NO_JAVA_UNICODE_ESCAPES);
+  const masked = maskTranslatedJavaStrings(source);
+  const rawOffsetAt = (offset) => translated.rawOffsets?.[offset] ?? offset;
+  const evidenceAt = (offset, length = 0) => {
+    const rawOffset = rawOffsetAt(offset);
+    const rawEnd = rawOffsetAt(Math.min(offset + length, translated.source.length));
+    return locator.at(rawOffset, rawEnd - rawOffset);
+  };
+  const packageName = masked.match(/\bpackage\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;/)?.[1] ?? "";
+  const imports = [...masked.matchAll(/\bimport\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$*][\w$*]*)*)\s*;/g)]
     .map((match) => match[1]);
 
   const types = [];
   const typePattern = /\b(class|interface|enum)\s+([A-Za-z_$][\w$]*)(?:\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?(?:\s*<[^>{}]+>)?))?(?:\s+implements\s+([^\{]+))?\s*\{/g;
-  const typeMatches = [...source.matchAll(typePattern)];
+  const typeMatches = [...masked.matchAll(typePattern)];
   const typeBraceDepths = braceDepthsAt(masked, typeMatches.flatMap((match) => [
     match.index,
     match.index + match[0].lastIndexOf("{"),
@@ -525,8 +673,8 @@ export function parseJava(content, filePath) {
       : directMember
         ? `${parent.fullName}$${name}`
         : parent
-          ? `${parent.fullName}$local$${name}$${match.index}`
-          : `${topLevelName}$nested$${match.index}`;
+          ? `${parent.fullName}$local$${name}$${rawOffsetAt(match.index)}`
+          : `${topLevelName}$nested$${rawOffsetAt(match.index)}`;
     const canonicalName = topLevel
       ? topLevelName
       : directMember && parent.canonicalName
@@ -541,7 +689,7 @@ export function parseJava(content, filePath) {
       staticMember,
       extendsType: (match[3] ?? "").replace(/\s*<.*>/g, ""),
       implementsTypes: typeList(match[4]),
-      evidence: locator.at(match.index, match[0].length),
+      evidence: evidenceAt(match.index, match[0].length),
       bodyStart,
       bodyEnd,
     });
@@ -549,7 +697,7 @@ export function parseJava(content, filePath) {
 
   const fields = [];
   const fieldPattern = /^[ \t]*(?:public|protected|private)\s+(?:(?:static|final|volatile|transient)\s+)*([A-Za-z_$][\w$.]*(?:\s*<[A-Za-z_$][\w$.,? <>\[\]]*>)?(?:\s*\[\])?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;]*)?;/gm;
-  const fieldMatches = [...source.matchAll(fieldPattern)];
+  const fieldMatches = [...masked.matchAll(fieldPattern)];
   const fieldBraceDepths = braceDepthsAt(masked, [
     ...types.map((type) => type.bodyStart),
     ...fieldMatches.map((match) => match.index),
@@ -561,13 +709,13 @@ export function parseJava(content, filePath) {
       type: match[1].replace(/\s+/g, ""),
       name: match[2],
       ownerType: owner?.fullName ?? "",
-      evidence: locator.at(match.index, match[0].length),
+      evidence: evidenceAt(match.index, match[0].length),
     });
   }
 
   const methods = [];
   const methodPattern = /^[ \t]*((?:(?:public|protected|private|static|final|synchronized|abstract|native|strictfp)\s+)*)([A-Za-z_$][\w$<>,.?\[\] \t]*?)\s+([A-Za-z_$][\w$]*)\s*\(((?:[^()]|\([^()]*\))*)\)\s*(?:throws\s+[^\{;]+)?([\{;])/gm;
-  const methodMatches = [...source.matchAll(methodPattern)];
+  const methodMatches = [...masked.matchAll(methodPattern)];
   const braceDepths = braceDepthsAt(masked, [
     ...types.map((type) => type.bodyStart),
     ...methodMatches.map((match) => match.index),
@@ -593,7 +741,7 @@ export function parseJava(content, filePath) {
       bodyStart: openOffset,
       bodyEnd,
       ownerType: owner?.fullName ?? "",
-      evidence: locator.at(match.index, match[0].length),
+      evidence: evidenceAt(match.index, match[0].length),
       returnedResults: [],
     });
   }
@@ -621,7 +769,7 @@ export function parseJava(content, filePath) {
       ownerMethod.returnedResults.push({
         name: match[1],
         kind: resultPattern.kind,
-        evidence: locator.at(match.index, match[0].length),
+        evidence: evidenceAt(match.index, match[0].length),
         offset: match.index,
       });
     }
@@ -646,7 +794,7 @@ export function parseJava(content, filePath) {
       enclosingMethod: ownerMethod.name,
       enclosingMethodArity: ownerMethod.parameters.length,
       enclosingMethodSignature: ownerMethod.methodSignature,
-      evidence: locator.at(match.index, match[0].length),
+      evidence: evidenceAt(match.index, match[0].length),
       offset: match.index,
     });
   }
@@ -663,7 +811,7 @@ export function parseJava(content, filePath) {
       enclosingMethodArity: ownerMethod.parameters.length,
       enclosingMethodSignature: ownerMethod.methodSignature,
       ownerType: ownerMethod.ownerType,
-      evidence: locator.at(match.index, match[0].length),
+      evidence: evidenceAt(match.index, match[0].length),
       offset: match.index,
     });
   }
@@ -684,7 +832,7 @@ export function parseJava(content, filePath) {
       enclosingMethodArity: ownerMethod.parameters.length,
       enclosingMethodSignature: ownerMethod.methodSignature,
       ownerType: ownerMethod.ownerType,
-      evidence: locator.at(match.index, match[0].length),
+      evidence: evidenceAt(match.index, match[0].length),
       offset: match.index,
     });
   }
@@ -697,6 +845,7 @@ export function parseJava(content, filePath) {
     ...stringConstantMatches.map((match) => match.index),
   ]);
   for (const match of stringConstantMatches) {
+    if (masked[match.index] !== source[match.index]) continue;
     const owner = owningType(types, match.index);
     if (!owner
       || stringConstantBraceDepths.get(match.index) !== stringConstantBraceDepths.get(owner.bodyStart) + 1) continue;
@@ -706,6 +855,7 @@ export function parseJava(content, filePath) {
   const statementUses = [];
   const statementPattern = /\b(queryForObject|queryForList|queryForMap|insert|update|delete)\s*\(\s*(?:"([^"]+)"|([A-Za-z_$][\w$]*))/g;
   for (const match of source.matchAll(statementPattern)) {
+    if (masked.slice(match.index, match.index + match[1].length) !== match[1]) continue;
     const ownerMethod = factEnclosingMethod(methods, types, blockedFactRanges, match.index);
     if (!ownerMethod || !isIbatisInvocation(source, match.index, ownerMethod.ownerType, fields)) continue;
     const literal = match[2] ?? "";
@@ -730,7 +880,7 @@ export function parseJava(content, filePath) {
         enclosingMethodArity: ownerMethod.parameters.length,
         enclosingMethodSignature: ownerMethod.methodSignature,
         ownerType: ownerMethod.ownerType,
-        evidence: locator.at(match.index, match[0].length),
+        evidence: evidenceAt(match.index, match[0].length),
         offset: match.index,
       });
     }
@@ -739,13 +889,21 @@ export function parseJava(content, filePath) {
   return {
     packageName,
     imports,
-    types,
+    types: types.map(({ bodyStart, bodyEnd, ...type }) => ({
+      ...type,
+      bodyStart: rawOffsetAt(bodyStart),
+      bodyEnd: rawOffsetAt(bodyEnd),
+    })),
     fields,
     localVariables: localVariables
       .sort((left, right) => left.offset - right.offset)
       .map(({ offset: _offset, ...localVariable }) => localVariable),
     stringConstants,
-    methods: methods.map(({ bodyStart, bodyEnd, ...method }) => ({ ...method, bodyStart, bodyEnd })),
+    methods: methods.map(({ bodyStart, bodyEnd, ...method }) => ({
+      ...method,
+      bodyStart: rawOffsetAt(bodyStart),
+      bodyEnd: rawOffsetAt(bodyEnd),
+    })),
     calls: calls.sort((left, right) => left.offset - right.offset).map(({ offset: _offset, ...call }) => call),
     statementUses: statementUses
       .sort((left, right) => left.offset - right.offset)

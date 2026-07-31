@@ -50,14 +50,14 @@ routes：37 total / 31 selected as use cases
 - Struts outcome edge 使用 `data.outcome.framework/name/classification/codeEvidence` 区分配置候选和代码返回可能性；`confidence` 只描述配置提取，不承载该 modality。旧索引缺少或包含非法 metadata 时统一回退为 candidate。
 - 代表性主流程之外会保留有不同 Java/page/route/statement/procedure/table 的备选分支，并为每条分支独立显示 confidence；图中未展开的聚合表访问使用带 `aggregated` 标签的虚线。
 - 动态 JSP 字段名不会作为字面字段或搜索词进入 Graph；如果属于可提交表单，请求会保留 `hasDynamicParameterNames` 与 `parametersComplete=false`，且不会借用同页另一表单的字段。静态 Struts 2 `key` 可作为输入绑定名，动态字段值不会冒充静态默认值。
-- Java parser facts 版本升至 `1.4.7`，JSP parser facts 版本升至 `1.5.10`，避免复用缺少返回证据、规范类型信息、方法可见性或包含旧 markup/字段误判的 cache。
+- Java parser facts 版本升至 `1.4.8`，JSP parser facts 版本升至 `1.5.10`，避免复用缺少返回证据、规范类型信息、方法可见性、text block 遮罩或包含旧 markup/字段误判的 cache。
 - `fmt:message` 等通用 taglib resource key 目前不会作为独立 evidence 进入 UIS，这是已知限制；运行时标签仍需结合 JSP 与资源文件复核。
 
 ## 结果
 
 固定 commit 仓库根目录的 real-project release gate 已完成；上面的 Graph、文档统计和 required/forbidden assertions 均来自本次根目录冷缓存重建，而不是此前 `LegacyApp/tdpWeb` 子目录的探索结果。
 
-fresh benchmark（500 组 fixture、3 samples）结果为 baseline 中位数 `16,048.205625 ms`、candidate 中位数 `977.367958 ms`、speedup `16.419819673482685x`，超过项目要求的 `3x` 门槛。
+fresh benchmark（500 组 fixture、3 samples）结果为 baseline 中位数 `15,363.457875 ms`、candidate 中位数 `1,000.125 ms`、speedup `15.36153768278965x`，超过项目要求的 `3x` 门槛。
 
 Windows PowerShell 5.1 的真实 junction 场景不能由本次 macOS 验证替代。当前 installer release gate 仍需在 Windows 上运行 `npm run test:installer:windows` 并达到 `91 pass, 0 skip`。
 

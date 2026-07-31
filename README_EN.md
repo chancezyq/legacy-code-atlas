@@ -290,4 +290,4 @@ $env:ATLAS_BENCH_SAMPLES = 3
 npm run benchmark
 ```
 
-The latest development run measured a baseline median of 16,048.21 ms and a candidate median of 977.37 ms, a `16.42x` speedup. Real company projects should still be measured separately.
+The latest development run measured a baseline median of 15,363.46 ms and a candidate median of 1,000.13 ms, a `15.36x` speedup. Real company projects should still be measured separately.

@@ -239,7 +239,7 @@ npm run benchmark
 
 它生成可重复的 JSP/Java/iBATIS/Struts fixture，分别运行冻结的 `0.1.0` baseline 和当前候选，运行前删除两边的 `.legacy-code-atlas`，并先验证两份 Graph 字节完全一致。默认门槛是候选中位数至少比 baseline 快 `3.00x`；可以用 `ATLAS_BENCH_MIN_SPEEDUP` 做本地诊断，但发布前不要降低门槛。真实公司项目仍需单独记录文件数、源码行数、机器配置和冷/热缓存结果。
 
-本次开发机验证的 baseline 中位数为 `16,048.21 ms`，candidate 中位数为 `977.37 ms`，加速 `16.42x`。
+本次开发机验证的 baseline 中位数为 `15,363.46 ms`，candidate 中位数为 `1,000.13 ms`，加速 `15.36x`。
 
 `ATLAS_BENCH_FILES=500` 表示 500 组生成 fixture，每组会生成多种源码文件；它用于稳定比较 baseline 和 candidate，不代表已经在 5 万个真实文件或 200 万行公司源码上完成容量验证。
 
