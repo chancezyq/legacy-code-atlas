@@ -1312,6 +1312,13 @@ export function parseJsp(content, filePath) {
     fields.push({
       name,
       value,
+      element: match.name,
+      inputType: (attributes.type ?? match.name).trim().toLowerCase(),
+      runtimeDerived: valueState.runtimeDerived,
+      required: Object.hasOwn(attributes, "required"),
+      disabled: !requestMetadata.submittable && (Object.hasOwn(attributes, "disabled")
+        || disabledByFieldset(disabledFieldsets, match.index)),
+      choice: requestMetadata.requestChoice,
       ...fieldContext,
       evidence: requestEvidence(locator, match, "name", source),
     });
@@ -1360,6 +1367,12 @@ export function parseJsp(content, filePath) {
     fields.push({
       name,
       value,
+      element: match.name,
+      inputType: match.name.split(":").at(-1),
+      runtimeDerived: valueState.runtimeDerived,
+      required: Object.hasOwn(attributes, "required"),
+      disabled: !requestMetadata.submittable && Object.hasOwn(attributes, "disabled"),
+      choice: requestMetadata.requestChoice,
       ...fieldContext,
       evidence: requestEvidence(locator, match, attributeName, source),
     });
@@ -1470,7 +1483,6 @@ export function parseJsp(content, filePath) {
     fields: sortedFields.map(({
       offset: _offset,
       formOwner: _formOwner,
-      submittable: _submittable,
       requestChoice: _requestChoice,
       requestValue: _requestValue,
       runtimeDerivedValue: _runtimeDerivedValue,

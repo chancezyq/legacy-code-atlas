@@ -55,6 +55,8 @@ test("CLI help documents --query-file for every trace command", async () => {
   assert.match(help.stdout, /doctor <project>/);
   assert.match(help.stdout, /analyze <project>[^\n]+--main-thread/);
   assert.match(help.stdout, /prepare-query <project>/);
+  assert.match(help.stdout, /technical-doc prepare <project> --query-file <path>/);
+  assert.match(help.stdout, /technical-doc validate <project> --query-file <path>/);
 
   for (const command of [
     "trace-feature",
@@ -77,6 +79,165 @@ test("CLI help documents --query-file for every trace command", async () => {
   assert.match(help.stdout, /1024 characters/);
   assert.match(help.stdout, /64 tokens/);
   assert.match(help.stdout, /64 KiB/);
+});
+
+test("CLI prepares and validates a fixed-path model-assisted technical document", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  const queryPath = path.join(atlasDirectory, "query.txt");
+  await writeFile(queryPath, "OrderAudit", "utf8");
+
+  const prepared = await run(process.execPath, [
+    cli,
+    "technical-doc",
+    "prepare",
+    project,
+    "--query-file",
+    queryPath,
+    "--json",
+  ]);
+  const preparation = JSON.parse(prepared.stdout);
+  const outputDirectory = path.join(atlasDirectory, "docs", "technical", "orderaudit");
+  assert.deepEqual(preparation.files, [
+    ".legacy-code-atlas/docs/technical/orderaudit/evidence.md",
+    ".legacy-code-atlas/docs/technical/orderaudit/instructions.md",
+  ]);
+  assert.equal(preparation.scope.query, "OrderAudit");
+  assert.equal(preparation.scope.matched, true);
+  assert.match(await readFile(path.join(outputDirectory, "evidence.md"), "utf8"), /OrderAuditAction[.]java:\d+/u);
+  assert.match(await readFile(path.join(outputDirectory, "instructions.md"), "utf8"), /## 8[.] Evidence Gaps/u);
+
+  const finalDocument = [
+    "# Order Audit",
+    "",
+    "## 1. Overview",
+    "Mapped by Struts (`WEB-INF/struts-config.xml:5`).",
+    "## 2. Workflow Stages",
+    "**Derived:** Action delegates to service (`src/com/acme/order/web/OrderAuditAction.java:14`).",
+    "## 3. Database Tables",
+    "Uses the audit table (`sqlmap/order.xml:23`).",
+    "## 4. Class Architecture",
+    "The action is implemented in Java (`src/com/acme/order/web/OrderAuditAction.java:6`).",
+    "## 5. Data Flow",
+    "The DAO calls the statement (`src/com/acme/order/dao/IbatisOrderDao.java:16`).",
+    "## 6. Business Rules",
+    "Decision is submitted by the page (`web/order/audit.jsp:11`).",
+    "## 7. Error Messages and Lookups",
+    "**Needs verification:** No matching lookup was retained (`web/order/audit.jsp:11`).",
+    "## 8. Evidence Gaps",
+    "**Needs verification:** Transaction boundaries are unknown (`src/com/acme/order/service/impl/OrderAuditServiceImpl.java:9`).",
+    "",
+  ].join("\n");
+  await writeFile(path.join(outputDirectory, "Technical_Workflow_Design.md"), finalDocument, "utf8");
+
+  const validated = await run(process.execPath, [
+    cli,
+    "technical-doc",
+    "validate",
+    project,
+    "--query-file",
+    queryPath,
+    "--json",
+  ]);
+  const report = JSON.parse(validated.stdout);
+  assert.equal(report.ok, true);
+  assert.equal(report.sections.present, 8);
+  assert.ok(report.citations.total >= 8);
+});
+
+test("technical document preparation rejects no-match scope without creating output", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  const queryPath = path.join(atlasDirectory, "query.txt");
+  await writeFile(queryPath, "NoSuchTechnicalFeature", "utf8");
+
+  await assert.rejects(
+    run(process.execPath, [cli, "technical-doc", "prepare", project, "--query-file", queryPath]),
+    (error) => error.code === 3 && /未找到技术文档范围/u.test(error.stdout),
+  );
+  await assert.rejects(access(path.join(atlasDirectory, "docs", "technical")), { code: "ENOENT" });
+});
+
+test("technical document preparation rejects a linked output directory", { skip: process.platform === "win32" }, async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  const queryPath = path.join(atlasDirectory, "query.txt");
+  const sentinelDirectory = path.join(project, "sentinel-output");
+  await writeFile(queryPath, "OrderAudit", "utf8");
+  await mkdir(sentinelDirectory);
+  await writeFile(path.join(sentinelDirectory, "sentinel.txt"), "unchanged\n", "utf8");
+  await mkdir(path.join(atlasDirectory, "docs"));
+  await symlink(sentinelDirectory, path.join(atlasDirectory, "docs", "technical"));
+
+  await assertCliError(
+    ["technical-doc", "prepare", project, "--query-file", queryPath],
+    /文档输出目录 technical[^\n]+(?:符号链接|链接|junction)/i,
+  );
+  assert.equal(await readFile(path.join(sentinelDirectory, "sentinel.txt"), "utf8"), "unchanged\n");
+  await assert.rejects(access(path.join(sentinelDirectory, "orderaudit")), { code: "ENOENT" });
+});
+
+test("technical document preparation replaces linked final files without touching their targets", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  const queryPath = path.join(atlasDirectory, "query.txt");
+  await writeFile(queryPath, "OrderAudit", "utf8");
+  await run(process.execPath, [cli, "technical-doc", "prepare", project, "--query-file", queryPath]);
+  const finalPath = path.join(atlasDirectory, "docs", "technical", "orderaudit", "Technical_Workflow_Design.md");
+  const sentinelPath = path.join(project, "source-sentinel.txt");
+  await writeFile(sentinelPath, "SOURCE_SENTINEL\n", "utf8");
+
+  if (process.platform !== "win32") {
+    await rm(finalPath);
+    await symlink(sentinelPath, finalPath);
+    await run(process.execPath, [cli, "technical-doc", "prepare", project, "--query-file", queryPath]);
+    assert.equal((await lstat(finalPath)).isSymbolicLink(), false);
+    assert.equal(await readFile(sentinelPath, "utf8"), "SOURCE_SENTINEL\n");
+  }
+
+  await rm(finalPath);
+  await link(sentinelPath, finalPath);
+  await run(process.execPath, [cli, "technical-doc", "prepare", project, "--query-file", queryPath]);
+  assert.equal((await stat(finalPath)).nlink, 1);
+  assert.equal(await readFile(finalPath, "utf8"), "");
+  assert.equal(await readFile(sentinelPath, "utf8"), "SOURCE_SENTINEL\n");
+
+  await rm(finalPath);
+  await mkdir(finalPath);
+  await assertCliError(
+    ["technical-doc", "prepare", project, "--query-file", queryPath],
+    /最终输出[^\n]+(?:普通文件|目录|特殊文件)/u,
+  );
+  assert.equal((await stat(finalPath)).isDirectory(), true);
+});
+
+test("technical document validation stays bound to the prepared evidence manifest", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const atlasDirectory = path.join(project, ".legacy-code-atlas");
+  const indexPath = path.join(atlasDirectory, "index.json");
+  const queryPath = path.join(atlasDirectory, "query.txt");
+  await writeFile(queryPath, "OrderAudit", "utf8");
+  await run(process.execPath, [cli, "technical-doc", "prepare", project, "--query-file", queryPath]);
+
+  const graph = JSON.parse(await readFile(indexPath, "utf8"));
+  graph.nodes.find(({ id }) => id === "java_type:com.acme.order.web.OrderAuditAction").filePath = "src/com/acme/a/OrderDao.java";
+  await writeFile(indexPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
+  const finalPath = path.join(atlasDirectory, "docs", "technical", "orderaudit", "Technical_Workflow_Design.md");
+  const sections = [
+    "## 1. Overview", "## 2. Workflow Stages", "## 3. Database Tables", "## 4. Class Architecture",
+    "## 5. Data Flow", "## 6. Business Rules", "## 7. Error Messages and Lookups", "## 8. Evidence Gaps",
+  ];
+  await writeFile(finalPath, sections.map((heading) => `${heading}\n\nClaim (\`src/com/acme/a/OrderDao.java:1\`).`).join("\n\n"), "utf8");
+
+  await assert.rejects(
+    run(process.execPath, [cli, "technical-doc", "validate", project, "--query-file", queryPath, "--json"]),
+    (error) => error.code === 4 && /outside prepared evidence/i.test(error.stdout),
+  );
 });
 
 test("CLI doctor reports a clean runtime as JSON", async (t) => {

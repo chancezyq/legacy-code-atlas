@@ -22,6 +22,11 @@ const SUMMARY_KEYS = new Set(["nodes", "edges", "nodeTypes", "edgeTypes"]);
 const NODE_KEYS = new Set(["id", "type", "name", "filePath", "evidence", "data", "searchText"]);
 const EDGE_KEYS = new Set(["id", "source", "target", "type", "confidence", "reason", "evidence", "data"]);
 const EVIDENCE_KEYS = new Set(["file", "line", "column", "snippet"]);
+const FIELD_DETAIL_KEYS = new Set([
+  "name", "element", "inputType", "staticValue", "runtimeDerived",
+  "required", "disabled", "choice", "submittable", "evidence",
+]);
+const PROPERTY_ENTRY_KEYS = new Set(["key", "value", "evidence"]);
 const NODE_TYPES = new Set([
   "file",
   "page",
@@ -127,18 +132,56 @@ function requireProjectRelativePath(value, label) {
   return value;
 }
 
+function validateEvidence(value, label) {
+  const item = requirePlainObject(value, label);
+  requireOnlyKeys(item, EVIDENCE_KEYS, label);
+  requireProjectRelativePath(item.file, `${label}.file 引用路径`);
+  requirePositiveInteger(item.line, `${label}.line`);
+  requirePositiveInteger(item.column, `${label}.column`);
+  requireSafeString(item.snippet, `${label}.snippet`, {
+    maxCharacters: MAX_EVIDENCE_SNIPPET_CHARACTERS,
+  });
+}
+
 function validateEvidenceList(value, label) {
   const evidence = requireArray(value, label);
   for (let index = 0; index < evidence.length; index += 1) {
-    const itemLabel = `${label}[${index}]`;
-    const item = requirePlainObject(evidence[index], itemLabel);
-    requireOnlyKeys(item, EVIDENCE_KEYS, itemLabel);
-    requireProjectRelativePath(item.file, `${itemLabel}.file 引用路径`);
-    requirePositiveInteger(item.line, `${itemLabel}.line`);
-    requirePositiveInteger(item.column, `${itemLabel}.column`);
-    requireSafeString(item.snippet, `${itemLabel}.snippet`, {
-      maxCharacters: MAX_EVIDENCE_SNIPPET_CHARACTERS,
-    });
+    validateEvidence(evidence[index], `${label}[${index}]`);
+  }
+}
+
+function requireBoolean(value, label) {
+  if (typeof value !== "boolean") fail(`${label} 必须是布尔值`);
+}
+
+function validateTechnicalNodeData(node, label) {
+  if (node.data.fieldDetails !== undefined) {
+    if (node.type !== "page") fail(`${label}.data.fieldDetails 只允许用于 page 节点`);
+    const fields = requireArray(node.data.fieldDetails, `${label}.data.fieldDetails`);
+    for (let index = 0; index < fields.length; index += 1) {
+      const fieldLabel = `${label}.data.fieldDetails[${index}]`;
+      const field = requirePlainObject(fields[index], fieldLabel);
+      requireOnlyKeys(field, FIELD_DETAIL_KEYS, fieldLabel);
+      for (const key of ["name", "element", "inputType", "staticValue"]) {
+        requireSafeString(field[key], `${fieldLabel}.${key}`, { maxCharacters: MAX_RENDERED_FIELD_CHARACTERS });
+      }
+      for (const key of ["runtimeDerived", "required", "disabled", "choice", "submittable"]) {
+        requireBoolean(field[key], `${fieldLabel}.${key}`);
+      }
+      validateEvidence(field.evidence, `${fieldLabel}.evidence`);
+    }
+  }
+  if (node.data.properties !== undefined) {
+    if (node.type !== "file") fail(`${label}.data.properties 只允许用于 file 节点`);
+    const entries = requireArray(node.data.properties, `${label}.data.properties`);
+    for (let index = 0; index < entries.length; index += 1) {
+      const entryLabel = `${label}.data.properties[${index}]`;
+      const entry = requirePlainObject(entries[index], entryLabel);
+      requireOnlyKeys(entry, PROPERTY_ENTRY_KEYS, entryLabel);
+      requireSafeString(entry.key, `${entryLabel}.key`, { nonEmpty: true });
+      requireSafeString(entry.value, `${entryLabel}.value`);
+      validateEvidence(entry.evidence, `${entryLabel}.evidence`);
+    }
   }
 }
 
@@ -193,6 +236,7 @@ export function validateGraphIndex(graph) {
     if (node.filePath !== undefined) requireProjectRelativePath(node.filePath, `${label}.filePath 路径`);
     validateEvidenceList(node.evidence, `${label}.evidence`);
     requirePlainObject(node.data, `${label}.data`);
+    validateTechnicalNodeData(node, label);
     const searchText = requireArray(node.searchText, `${label}.searchText`);
     const uniqueSearchText = new Set();
     for (let textIndex = 0; textIndex < searchText.length; textIndex += 1) {

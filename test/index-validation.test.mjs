@@ -118,3 +118,38 @@ test("index bounds fields that are repeated in rendered trace output", () => {
     assert.throws(() => validateGraphIndex(graph), /过长/);
   }
 });
+
+test("index validates technical-document evidence nested in node data", () => {
+  const pageGraph = validGraph();
+  pageGraph.nodes[0].data.fieldDetails = [{
+    name: "decision",
+    element: "select",
+    inputType: "select",
+    staticValue: "PASS",
+    runtimeDerived: false,
+    required: true,
+    disabled: false,
+    choice: true,
+    submittable: true,
+    evidence: { file: "../outside.jsp", line: 2, column: 1, snippet: "decision" },
+  }];
+  assert.throws(() => validateGraphIndex(pageGraph), /项目相对 POSIX 路径/);
+
+  const propertiesGraph = validGraph();
+  propertiesGraph.nodes[0] = {
+    ...propertiesGraph.nodes[0],
+    id: "file:WEB-INF/classes/messages.properties",
+    type: "file",
+    name: "messages.properties",
+    filePath: "WEB-INF/classes/messages.properties",
+    data: {
+      properties: [{
+        key: "error.audit",
+        value: "Audit failed",
+        evidence: { file: "file:///etc/passwd", line: 1, column: 1, snippet: "error.audit" },
+      }],
+    },
+  };
+  propertiesGraph.summary.nodeTypes = { file: 1, table: 1 };
+  assert.throws(() => validateGraphIndex(propertiesGraph), /项目相对 POSIX 路径/);
+});

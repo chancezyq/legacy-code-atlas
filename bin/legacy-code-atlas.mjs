@@ -16,6 +16,14 @@ import { searchGraph, traceFeature, traceProcedure, traceStatement, traceTable, 
 import { buildDocumentModel, scopeSlug } from "../src/doc-model.mjs";
 import { renderDiagrams, renderUiSpec, renderUseCases } from "../src/doc-render.mjs";
 import { renderInlineText, renderTraceMarkdown } from "../src/render.mjs";
+import {
+  buildTechnicalEvidence,
+  readTechnicalEvidenceManifest,
+  renderTechnicalEvidence,
+  renderTechnicalEvidenceManifest,
+  renderTechnicalInstructions,
+  validateTechnicalDocument,
+} from "../src/technical-doc.mjs";
 import { inspectOpenCodeCompatibility, renderOpenCodeDoctor } from "../src/opencode-doctor.mjs";
 import { containsUnsafeTextControl, replaceUnsafeTextControls } from "../src/text-safety.mjs";
 
@@ -27,6 +35,8 @@ Usage:
   legacy-code-atlas docs <project> [--json]
   legacy-code-atlas docs <project> --query-file <path> [--no-match-ok] [--json]
   legacy-code-atlas prepare-query <project>
+  legacy-code-atlas technical-doc prepare <project> --query-file <path> [--no-match-ok] [--json]
+  legacy-code-atlas technical-doc validate <project> --query-file <path> [--json]
   legacy-code-atlas overview <project-or-index> [--json]
   legacy-code-atlas search <project-or-index> <term> [--json]
   legacy-code-atlas trace-feature <project-or-index> <term> [--json]
@@ -271,15 +281,17 @@ async function inspectStandardIndex(projectRoot, { allowMissing = false } = {}) 
   return indexPath;
 }
 
-async function ensureRealAtlasSubdirectories(atlasDirectory, segments) {
+async function ensureRealAtlasSubdirectories(atlasDirectory, segments, { create = true } = {}) {
   let current = atlasDirectory;
   let canonicalParent = await realpath(atlasDirectory);
   for (const segment of segments) {
     current = path.join(current, segment);
-    try {
-      await mkdir(current);
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+    if (create) {
+      try {
+        await mkdir(current);
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
     }
     const entry = await lstat(current);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
@@ -313,6 +325,21 @@ async function prepareQueryFile(projectRoot) {
   }
   await writeFileAtomic(queryPath, "", { mode: 0o600 });
   return queryPath;
+}
+
+async function prepareTechnicalDocumentFile(documentPath) {
+  try {
+    const entry = await lstat(documentPath);
+    if (!entry.isSymbolicLink() && !entry.isFile()) {
+      throw new Error("技术文档最终输出必须是可替换的普通文件，不能是目录或特殊文件");
+    }
+    if (entry.isSymbolicLink() || hasMultipleLinks(entry)) {
+      await rm(documentPath, { force: true });
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await writeFileAtomic(documentPath, "", { mode: 0o600 });
 }
 
 async function projectRootForQuery(input) {
@@ -416,10 +443,18 @@ function renderSearch(results, query) {
 
 async function main() {
   const { positional, json, output, queryFile, noMatchOk, mainThread } = parseArguments(process.argv.slice(2));
-  const [command, input, ...queryParts] = positional;
+  let [command, input, ...queryParts] = positional;
   if (!command || command === "help" || command === "--help" || command === "-h") {
     process.stdout.write(HELP);
     return;
+  }
+  if (command === "technical-doc") {
+    const action = input;
+    if (!new Set(["prepare", "validate"]).has(action)) {
+      throw new Error("technical-doc 需要 prepare 或 validate 子命令");
+    }
+    [input, ...queryParts] = queryParts;
+    command = `technical-doc-${action}`;
   }
   if (!input) throw new Error(`命令 ${command} 缺少项目或索引路径`);
 
@@ -428,10 +463,16 @@ async function main() {
   if (queryFile !== null && queryParts.length > 0) {
     throw new Error("不能同时使用查询参数和 --query-file");
   }
-  if (queryFile !== null && !TRACE_HANDLERS[command] && command !== "docs") {
+  if (queryFile !== null
+    && !TRACE_HANDLERS[command]
+    && command !== "docs"
+    && !new Set(["technical-doc-prepare", "technical-doc-validate"]).has(command)) {
     throw new Error(`命令 ${command} 不支持 --query-file`);
   }
-  if (noMatchOk && !TRACE_HANDLERS[command] && command !== "docs") {
+  if (noMatchOk
+    && !TRACE_HANDLERS[command]
+    && command !== "docs"
+    && command !== "technical-doc-prepare") {
     throw new Error(`命令 ${command} 不支持 --no-match-ok`);
   }
   if (noMatchOk && queryFile === null) {
@@ -457,6 +498,92 @@ async function main() {
     if (queryParts.length > 0 || json || output) throw new Error("prepare-query 不接受额外参数");
     const queryPath = await prepareQueryFile(input);
     process.stdout.write(`问题文件已安全准备：${queryPath}\n`);
+    return;
+  }
+
+  if (command === "technical-doc-prepare") {
+    if (queryParts.length > 0 || output || queryFile === null) {
+      throw new Error("technical-doc prepare 只接受项目路径和 --query-file");
+    }
+    const project = path.resolve(input);
+    const projectMetadata = await stat(project);
+    if (!projectMetadata.isDirectory()) throw new Error("technical-doc prepare 需要项目目录");
+    const scopeQuery = await readQueryFile(queryFile, project);
+    validateLogicalQuery(scopeQuery);
+    const graph = await loadGraph(project);
+    const evidence = buildTechnicalEvidence(graph, scopeQuery);
+    if (!evidence.matched && !noMatchOk) {
+      process.stdout.write(json
+        ? `${JSON.stringify({ scope: { query: scopeQuery, matched: false }, files: [] }, null, 2)}\n`
+        : `未找到技术文档范围：${renderInlineText(scopeQuery)}\n`);
+      process.exitCode = 3;
+      return;
+    }
+    const indexPath = await inspectStandardIndex(project);
+    const docsDirectory = await ensureRealAtlasSubdirectories(
+      path.dirname(indexPath),
+      ["docs", "technical", scopeSlug(scopeQuery)],
+    );
+    const renderedEvidence = renderTechnicalEvidence(evidence);
+    const documents = [
+      ["evidence.md", renderedEvidence],
+      ["instructions.md", renderTechnicalInstructions(evidence)],
+    ];
+    await writeFileAtomic(
+      path.join(docsDirectory, ".evidence-manifest.json"),
+      renderTechnicalEvidenceManifest(evidence, renderedEvidence),
+      { mode: 0o600 },
+    );
+    await prepareTechnicalDocumentFile(path.join(docsDirectory, "Technical_Workflow_Design.md"));
+    const files = [];
+    for (const [fileName, contents] of documents) {
+      const target = path.join(docsDirectory, fileName);
+      await writeFileAtomic(target, contents);
+      files.push(path.relative(project, target).replaceAll("\\", "/"));
+    }
+    const result = { files, scope: { query: scopeQuery, matched: evidence.matched }, truncated: evidence.truncated };
+    process.stdout.write(json
+      ? `${JSON.stringify(result, null, 2)}\n`
+      : [`技术文档证据准备完成：${scopeQuery}`, ...files.map((file) => `- ${file}`), ""].join("\n"));
+    return;
+  }
+
+  if (command === "technical-doc-validate") {
+    if (queryParts.length > 0 || output || queryFile === null || noMatchOk) {
+      throw new Error("technical-doc validate 只接受项目路径和 --query-file");
+    }
+    const project = path.resolve(input);
+    const projectMetadata = await stat(project);
+    if (!projectMetadata.isDirectory()) throw new Error("technical-doc validate 需要项目目录");
+    const scopeQuery = await readQueryFile(queryFile, project);
+    validateLogicalQuery(scopeQuery);
+    const indexPath = await inspectStandardIndex(project);
+    const docsDirectory = await ensureRealAtlasSubdirectories(
+      path.dirname(indexPath),
+      ["docs", "technical", scopeSlug(scopeQuery)],
+      { create: false },
+    );
+    const documentPath = path.join(docsDirectory, "Technical_Workflow_Design.md");
+    const allowedFiles = await readTechnicalEvidenceManifest(
+      project,
+      path.join(docsDirectory, ".evidence-manifest.json"),
+      path.join(docsDirectory, "evidence.md"),
+      scopeQuery,
+    );
+    const report = await validateTechnicalDocument(project, documentPath, {
+      allowedFiles,
+    });
+    process.stdout.write(json
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : [
+        report.ok ? "技术文档校验通过" : "技术文档校验失败",
+        `章节：${report.sections.present}/${report.sections.required}`,
+        `引用：${report.citations.total} 处，${report.citations.files} 个文件`,
+        `Derived：${report.markers.derived}；Needs verification：${report.markers.needsVerification}`,
+        ...report.errors.map((error) => `- ${error}`),
+        "",
+      ].join("\n"));
+    if (!report.ok) process.exitCode = 4;
     return;
   }
 

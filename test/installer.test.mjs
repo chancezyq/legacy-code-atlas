@@ -216,6 +216,14 @@ test("installer validates Skill-only sources and published artifacts before comm
     skillValidation.includes('node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok'),
     "installer must require the fixed scoped docs command",
   );
+  assert.ok(
+    skillValidation.includes('node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc prepare "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"'),
+    "installer must require the fixed technical document preparation command",
+  );
+  assert.ok(
+    skillValidation.includes('node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc validate "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"'),
+    "installer must require the fixed technical document validation command",
+  );
   assert.match(publishedValidation, /Get-ContentHash\s+\$SkillTarget/);
   assert.match(publishedValidation, /SkillSha256/);
   assert.match(publishedValidation, /Assert-.*Skill/);

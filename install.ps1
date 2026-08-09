@@ -227,6 +227,8 @@ function Assert-SkillCliProtocolContent([string]$Path) {
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"',
+        'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc prepare "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"',
+        'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc validate "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" trace-url "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" trace-statement "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',
         'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" trace-table "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt" --no-match-ok',

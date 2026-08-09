@@ -84,6 +84,30 @@ function normalizedForExpectedEvidenceAdditions(graph) {
     assert.deepEqual(edge.data.outcome, expectedOutcomes.get(edge.id));
     delete edge.data.outcome;
   }
+  const auditPage = nodeById(normalized, "page:web/order/audit.jsp");
+  assert.deepEqual(
+    auditPage.data.fieldDetails?.map((field) => ({
+      name: field.name,
+      element: field.element,
+      inputType: field.inputType,
+      staticValue: field.staticValue,
+      runtimeDerived: field.runtimeDerived,
+      submittable: field.submittable,
+      file: field.evidence?.file,
+      line: field.evidence?.line,
+    })),
+    [
+      { name: "orderId", element: "input", inputType: "hidden", staticValue: "", runtimeDerived: true, submittable: true, file: "web/order/audit.jsp", line: 9 },
+      { name: "method", element: "input", inputType: "hidden", staticValue: "audit", runtimeDerived: false, submittable: true, file: "web/order/audit.jsp", line: 10 },
+      { name: "decision", element: "select", inputType: "select", staticValue: "PASS", runtimeDerived: false, submittable: true, file: "web/order/audit.jsp", line: 11 },
+    ],
+    "only the expected audit page may gain rich technical-document field facts",
+  );
+  const pagesWithFieldDetails = normalized.nodes.filter((node) => node.data?.fieldDetails);
+  assert.deepEqual(pagesWithFieldDetails.map(({ id }) => id), ["page:web/order/audit.jsp"]);
+  const { fieldDetails: retainedFieldDetails, ...baselinePageData } = auditPage.data;
+  assert.ok(retainedFieldDetails.length > 0);
+  auditPage.data = baselinePageData;
   return normalized;
 }
 

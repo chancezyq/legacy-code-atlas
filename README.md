@@ -140,6 +140,27 @@ node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-fi
 
 候选与模块名完全一致时按模块过滤，否则按功能在索引中搜索；范围文档写入 `.legacy-code-atlas/docs/scoped/<slug>/`，文件头会注明范围。模块或功能文本永远不进入命令行；无匹配时与 trace 相同，最多再尝试两个短候选并报告全部候选。
 
+## 生成附件风格的技术流程设计文档
+
+如果需要针对一个业务功能生成接近人工技术设计稿的单份文档，请在索引存在后用普通消息提出，例如“为 OrderAudit 生成详细技术流程设计文档”。这条流程与 `/atlas docs` 不同：Atlas 先抽取有界、带引用的证据包，公司已经配置的模型再阅读证据和其中列出的项目内源码，最后 Atlas 校验产物。Node.js CLI 不调用模型 API，也不需要新增模型地址或密钥。
+
+Skill 使用两个固定命令，功能名仍只通过受保护的 `.legacy-code-atlas/query.txt` 传递：
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc prepare "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc validate "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"
+```
+
+产物位于：
+
+```text
+.legacy-code-atlas/docs/technical/<slug>/evidence.md
+.legacy-code-atlas/docs/technical/<slug>/instructions.md
+.legacy-code-atlas/docs/technical/<slug>/Technical_Workflow_Design.md
+```
+
+最终文档固定包含 Overview、Workflow Stages、Database Tables、Class Architecture、Data Flow、Business Rules、Error Messages and Lookups、Evidence Gaps 八节。具体结论必须附项目相对 `path:line` 引用；跨文件结论标记 `Derived`，证据不足处标记 `Needs verification`。校验器会拒绝缺节、无引用、越界或不存在的引用、无效 UTF-8、超限文件以及链接形式的最终文档，并报告章节、引用和不确定性标记数量。它能验证结构和证据引用安全，不能机械证明模型语义完全正确。
+
 ## 安装位置
 
 默认安装到当前 Windows 用户目录：

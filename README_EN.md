@@ -135,6 +135,27 @@ node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" docs "$PWD" --query-fi
 
 A candidate that exactly matches a module name filters by module; anything else scopes by feature search over the index. Scoped files are written to `.legacy-code-atlas/docs/scoped/<slug>/` and state their scope in the header. The module or feature text never enters the command line; on no match, the same bounded fallback as traces applies — at most two short alternative candidates, all reported.
 
+## Generating an attachment-style technical workflow design
+
+For one detailed, human-style technical design document, ask in ordinary language after the index exists, for example: "Generate a detailed technical workflow design for OrderAudit." This workflow differs from `/atlas docs`: Atlas first extracts a bounded evidence dossier with citations, the company's existing model reads that dossier and only its listed project-local source files, and Atlas validates the result. The Node.js CLI does not invoke a model API and requires no additional model endpoint or credentials.
+
+The Skill uses two fixed commands; the feature candidate still travels only through the protected `.legacy-code-atlas/query.txt` file:
+
+```sh
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc prepare "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"
+node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc validate "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"
+```
+
+Artifacts are written under:
+
+```text
+.legacy-code-atlas/docs/technical/<slug>/evidence.md
+.legacy-code-atlas/docs/technical/<slug>/instructions.md
+.legacy-code-atlas/docs/technical/<slug>/Technical_Workflow_Design.md
+```
+
+The final document keeps eight required sections: Overview, Workflow Stages, Database Tables, Class Architecture, Data Flow, Business Rules, Error Messages and Lookups, and Evidence Gaps. Every concrete claim needs a project-relative `path:line` citation; cross-file conclusions are marked `Derived`, and incomplete evidence is marked `Needs verification`. Validation rejects missing sections, missing citations, unsafe or nonexistent cited paths, invalid UTF-8, oversized files, and linked final documents, then reports section, citation, and uncertainty-marker coverage. It verifies structure and citation safety; it cannot mechanically prove that the model's semantics are complete.
+
 ## Installation locations
 
 The default installation is under the current Windows user profile:

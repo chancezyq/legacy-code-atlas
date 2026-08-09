@@ -285,6 +285,24 @@ test("README compatibility requirements name every host capability used by the S
   }
 });
 
+test("README documents the model-assisted technical workflow output and validation", async () => {
+  const readmes = await Promise.all([
+    "../README.md",
+    "../README_EN.md",
+  ].map((file) => readFile(new URL(file, import.meta.url), "utf8")));
+
+  for (const readme of readmes) {
+    assert.match(readme, /Technical_Workflow_Design[.]md/u);
+    assert.match(readme, /[.]legacy-code-atlas[\/]docs[\/]technical[\/]<slug>/u);
+    assert.match(readme, /company(?:'s)?(?: configured| existing)? model|公司[^\n]+模型/iu);
+    assert.match(readme, /evidence(?: dossier)?|证据包/iu);
+    assert.match(readme, /validat|校验/iu);
+    assert.match(readme, /technical-doc prepare/u);
+    assert.match(readme, /technical-doc validate/u);
+    assert.match(readme, /does not invoke a model API|不调用模型 API/iu);
+  }
+});
+
 test("OpenCode guidance defines Shell semantics and large-scan timeout requirements", async () => {
   const skill = await readFile(
     new URL("../integrations/opencode/skills/atlas/SKILL.md", import.meta.url),
@@ -374,6 +392,50 @@ test("atlas generates shareable documents through one fixed docs command", async
   assert.match(section, /never place[^\n]+(?:module|feature)[^\n]+command line/i);
   assert.match(section, /docs[\\/]scoped[\\/]/);
   assert.match(section, /(?:at most|maximum of)[^\n]+two[^\n]+alternative[^\n]+candidate/i);
+});
+
+test("atlas orchestrates model-assisted technical workflow documents through fixed commands", async () => {
+  const atlasSkill = await readFile(new URL("../integrations/opencode/skills/atlas/SKILL.md", import.meta.url), "utf8");
+  const section = markdownSection(atlasSkill, "Technical workflow documents");
+  const prepareQuery = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"';
+  const prepareDocument = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc prepare "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"';
+  const validateDocument = 'node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" technical-doc validate "$PWD" --query-file "$PWD/.legacy-code-atlas/query.txt"';
+
+  for (const command of [prepareQuery, prepareDocument, validateDocument]) {
+    const matches = [...section.matchAll(/```(?:sh|shell|bash)\r?\n([\s\S]*?)```/gi)]
+      .filter((match) => match[1].trim() === command);
+    assert.equal(matches.length, 1, `${command} must appear as one fixed Shell block`);
+  }
+
+  const queryWrite = section.search(/structured\s+`write`[^\n]+project-relative[^\n]+`[.]legacy-code-atlas\/query[.]txt`/i);
+  const prepareIndex = section.indexOf(prepareDocument);
+  const dossierRead = section.search(/structured\s+`read`[^\n]+`[.]legacy-code-atlas\/docs\/technical\/<slug>\/evidence[.]md`/i);
+  const instructionsRead = section.search(/structured\s+`read`[^\n]+`[.]legacy-code-atlas\/docs\/technical\/<slug>\/instructions[.]md`/i);
+  const sourceRead = section.search(/read only[^\n]+(?:source files|citations)[^\n]+(?:listed|named)[^\n]+evidence/i);
+  const finalWrite = section.search(/structured\s+`write`[^\n]+exact[^\n]+`[.]legacy-code-atlas\/docs\/technical\/<slug>\/Technical_Workflow_Design[.]md`/i);
+  const validateIndex = section.indexOf(validateDocument);
+
+  for (const [name, index] of [
+    ["query write", queryWrite],
+    ["prepare command", prepareIndex],
+    ["evidence read", dossierRead],
+    ["instructions read", instructionsRead],
+    ["cited source restriction", sourceRead],
+    ["final write", finalWrite],
+    ["validate command", validateIndex],
+  ]) assert.notEqual(index, -1, `missing ${name}`);
+  assert.ok(queryWrite < prepareIndex);
+  assert.ok(prepareIndex < dossierRead && prepareIndex < instructionsRead);
+  assert.ok(dossierRead < sourceRead && instructionsRead < sourceRead);
+  assert.ok(sourceRead < finalWrite && finalWrite < validateIndex);
+
+  assert.match(section, /company(?:'s)? existing model|company-configured model/i);
+  assert.match(section, /eight|required headings/i);
+  assert.match(section, /project-relative `path:line` citation/i);
+  assert.match(section, /Derived/u);
+  assert.match(section, /Needs verification/u);
+  assert.match(section, /never[^\n]+(?:modify|edit)[^\n]+project source/i);
+  assert.match(section, /if[^\n]+validation[^\n]+fails[^\n]+stop/i);
 });
 
 test("the legacy understand Markdown command is removed", async () => {

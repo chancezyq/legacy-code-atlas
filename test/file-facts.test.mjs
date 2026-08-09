@@ -54,16 +54,18 @@ test("parserKindFor selects explicit versioned parsers and scanner-compatible me
     ["java", "jsp", "javascript", "xml"].map((language) => parserKindFor(sourceFile(`source.${language}`, language))),
     ["java", "jsp", "javascript", "xml"],
   );
-  for (const language of ["html", "properties", "markdown", "text"]) {
+  assert.equal(parserKindFor(sourceFile("messages.properties", "properties")), "properties");
+  for (const language of ["html", "markdown", "text"]) {
     assert.equal(parserKindFor(sourceFile(`source.${language}`, language)), "metadata");
   }
   assert.equal(parserKindFor(sourceFile("image.png", "unknown")), null);
-  assert.deepEqual(Object.keys(PARSER_VERSIONS).sort(), ["java", "javascript", "jsp", "metadata", "sql", "xml"]);
+  assert.deepEqual(Object.keys(PARSER_VERSIONS).sort(), ["java", "javascript", "jsp", "metadata", "properties", "sql", "xml"]);
   assert.equal(PARSER_VERSIONS.java, "1.4.8");
   assert.equal(PARSER_VERSIONS.jsp, "1.5.10");
   assert.equal(PARSER_VERSIONS.javascript, "1.1.2");
   assert.equal(PARSER_VERSIONS.xml, "1.3.4");
   assert.equal(PARSER_VERSIONS.sql, "1.0.0");
+  assert.equal(PARSER_VERSIONS.properties, "1.0.0");
   for (const version of Object.values(PARSER_VERSIONS)) assert.match(version, /^\d+\.\d+\.\d+$/);
 });
 

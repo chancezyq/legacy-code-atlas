@@ -87,6 +87,80 @@ test("materializer preserves JavaScript and iBATIS graph mutations", () => {
   assert.ok(edge(graph, "statement:order.save", "writes_to", "table:dbo.t_order"));
 });
 
+test("materializer preserves rich JSP field evidence for technical documentation", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record("web/FeatureAudit.jsp", "jsp", [
+      "<form action='/audit/submit.do' method='post'>",
+      "  <input type='hidden' name='recordId' value='${audit.id}' required>",
+      "  <input type='checkbox' name='notifyOwner' value='Y' checked>",
+      "  <select name='decision'><option value='APPROVE' selected>Approve</option></select>",
+      "</form>",
+    ].join("\n"), "markup")],
+  });
+  const page = graph.nodes.find(({ id }) => id === "page:web/FeatureAudit.jsp");
+
+  assert.deepEqual(page.data.fieldDetails.map((field) => ({
+    name: field.name,
+    element: field.element,
+    inputType: field.inputType,
+    staticValue: field.staticValue,
+    runtimeDerived: field.runtimeDerived,
+    required: field.required,
+    choice: field.choice,
+    line: field.evidence.line,
+  })), [
+    {
+      name: "recordId",
+      element: "input",
+      inputType: "hidden",
+      staticValue: "",
+      runtimeDerived: true,
+      required: true,
+      choice: false,
+      line: 2,
+    },
+    {
+      name: "notifyOwner",
+      element: "input",
+      inputType: "checkbox",
+      staticValue: "Y",
+      runtimeDerived: false,
+      required: false,
+      choice: true,
+      line: 3,
+    },
+    {
+      name: "decision",
+      element: "select",
+      inputType: "select",
+      staticValue: "APPROVE",
+      runtimeDerived: false,
+      required: false,
+      choice: false,
+      line: 4,
+    },
+  ]);
+});
+
+test("materializer retains properties entries on searchable file nodes", () => {
+  const graph = materializeRecords({
+    projectRoot,
+    records: [record(
+      "WEB-INF/classes/ApplicationResources.properties",
+      "properties",
+      "error.audit.expired=Audit request has expired\n",
+      "config",
+    )],
+  });
+  const file = graph.nodes.find(({ id }) => id === "file:WEB-INF/classes/ApplicationResources.properties");
+
+  assert.equal(file.data.properties[0].key, "error.audit.expired");
+  assert.equal(file.data.properties[0].value, "Audit request has expired");
+  assert.equal(file.data.properties[0].evidence.line, 1);
+  assert.ok(file.searchText.includes("error.audit.expired"));
+});
+
 test("external JavaScript requests inherit every loading page context", () => {
   const graph = materializeRecords({
     projectRoot,

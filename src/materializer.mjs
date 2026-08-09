@@ -273,7 +273,27 @@ function materializeJsp(graph, record, file, sourceFile, pageFileByWebPath, pend
     filePath: file.path,
     evidence: parsed.textEntries.map((entry) => entry.evidence),
     searchText: [file.path, parsed.visibleText, ...parsed.textEntries.map((entry) => entry.text), ...parsed.fields.map((field) => field.name)],
-    data: { visibleText: parsed.visibleText, fields: parsed.fields.map((field) => field.name) },
+    data: {
+      visibleText: parsed.visibleText,
+      fields: parsed.fields.map((field) => field.name),
+      fieldDetails: parsed.fields.map((field) => ({
+        name: field.name,
+        element: field.element ?? "",
+        inputType: field.inputType ?? "",
+        staticValue: field.value ?? "",
+        runtimeDerived: field.runtimeDerived === true,
+        required: field.required === true,
+        disabled: field.disabled === true,
+        choice: field.choice === true,
+        submittable: field.submittable !== false,
+        evidence: {
+          file: field.evidence.file,
+          line: field.evidence.line,
+          column: field.evidence.column,
+          snippet: `${field.element ?? "field"} field ${field.name}`,
+        },
+      })),
+    },
   });
   graph.addEdge({ source: sourceFile.id, target: page.id, type: "contains", confidence: 1, reason: "JSP page" });
   for (const include of parsed.includes) {
@@ -465,6 +485,18 @@ function materializeJava(graph, record, file, sourceFile, resolverFacts) {
     return typeRecord;
   });
   resolverFacts.javaFiles.push({ ...parsed, file, sourceFile, types: typeRecords });
+}
+
+function materializeProperties(graph, record, sourceFile) {
+  sourceFile.data = {
+    ...sourceFile.data,
+    properties: record.facts.entries,
+  };
+  sourceFile.evidence = record.facts.entries.map((entry) => entry.evidence);
+  sourceFile.searchText = [...new Set([
+    ...sourceFile.searchText,
+    ...record.facts.entries.flatMap((entry) => [entry.key, entry.value]),
+  ])];
 }
 
 function pageNodeForPath(graph, rawPath, evidence, pageFileByWebPath, searchText = []) {
@@ -905,6 +937,8 @@ export function materializeRecords({ projectRoot, records, skipped = [] }) {
       materializeXml(graph, record, file, sourceFile, resolverFacts, pageFileByWebPath, tileDefinitionNames);
     } else if (record.parserKind === "sql") {
       materializeSql(graph, record, file, sourceFile, resolverFacts);
+    } else if (record.parserKind === "properties") {
+      materializeProperties(graph, record, sourceFile);
     }
   }
 

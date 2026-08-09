@@ -3,6 +3,7 @@ import path from "node:path";
 import { parseIbatisSqlMap } from "./parsers/ibatis.mjs";
 import { parseJava } from "./parsers/java.mjs";
 import { extractJavaScriptRequests, parseJsp } from "./parsers/jsp.mjs";
+import { parseProperties } from "./parsers/properties.mjs";
 import { parseSqlServer } from "./parsers/sql-server.mjs";
 import {
   parseSpringConfig,
@@ -21,11 +22,12 @@ export const PARSER_VERSIONS = Object.freeze({
   javascript: "1.1.2",
   xml: "1.3.4",
   sql: "1.0.0",
+  properties: "1.0.0",
   metadata: "1.0.0",
 });
 
-const PARSED_LANGUAGES = new Set(["java", "jsp", "javascript", "xml", "sql"]);
-const METADATA_LANGUAGES = new Set(["html", "properties", "markdown", "text"]);
+const PARSED_LANGUAGES = new Set(["java", "jsp", "javascript", "xml", "sql", "properties"]);
+const METADATA_LANGUAGES = new Set(["html", "markdown", "text"]);
 
 function relativePathFor(file) {
   const raw = String(file?.relativePath ?? file?.path ?? "").replaceAll("\\", "/");
@@ -86,6 +88,7 @@ const DEFAULT_PARSERS = Object.freeze({
   },
   xml: parseXml,
   sql: parseSqlServer,
+  properties: parseProperties,
 });
 
 function parserWarnings(parserKind, facts) {
