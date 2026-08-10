@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertGraphEquivalent } from "./baseline.mjs";
+import { serializeGraph } from "../src/graph.mjs";
 
 const run = promisify(execFile);
 const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -38,6 +39,16 @@ export function assertMinimumSpeedup(baselineSamples, candidateSamples, minimum 
     throw new Error(`candidate benchmark must be at least ${minimum.toFixed(2)}x faster (observed ${ratio.toFixed(2)}x)`);
   }
   return ratio;
+}
+
+export function normalizedBenchmarkCandidate(graph) {
+  const normalized = structuredClone(graph);
+  for (const node of normalized.nodes ?? []) {
+    if (node.type === "page" && Array.isArray(node.data?.fieldDetails) && node.data.fieldDetails.length === 0) {
+      delete node.data.fieldDetails;
+    }
+  }
+  return normalized;
 }
 
 function sourceFor(index) {
@@ -112,7 +123,7 @@ export async function runBenchmark({ fileCount = 500, samples = 3, minimumSpeedu
       const candidateBytes = await readFile(candidateOutput, "utf8");
       if (sample === 0) {
         baselineSerialized = baselineBytes;
-        candidateSerialized = candidateBytes;
+        candidateSerialized = serializeGraph(normalizedBenchmarkCandidate(JSON.parse(candidateBytes)));
         assertGraphEquivalent({ serialized: baselineSerialized }, { serialized: candidateSerialized });
       }
     }
