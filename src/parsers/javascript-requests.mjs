@@ -101,8 +101,27 @@ function closingControlHeaderAllowsRegex(source, closingIndex) {
 function scanJavaScriptCode(source, start, ranges, stopAtClosingBrace = false) {
   let cursor = start;
   let braceDepth = 0;
+  // One regex per scan (not shared: template expressions recurse into
+  // this function, and a shared regex would lose its position). Note
+  // the global flag: a sticky regex would only match exactly at
+  // lastIndex and report "no match" on a whitespace position, which
+  // would skip the rest of the scan; the global flag searches forward
+  // from lastIndex instead.
+  const nonWhitespace = /\S/g;
   while (cursor < source.length) {
     const character = source[cursor];
+    // Skip blank runs in native code. Whitespace can never open a
+    // string, comment or regex literal, and never changes brace depth,
+    // so jumping over it cannot change what is found: regex-literal
+    // detection scans backwards over whitespace itself, and string and
+    // template bodies are scanned by their own loops. This matters
+    // because the masked input is mostly blanked-out non-script regions.
+    if (character === " " || character === "\n" || character === "\r" || character === "\t") {
+      nonWhitespace.lastIndex = cursor;
+      const found = nonWhitespace.exec(source);
+      cursor = found ? found.index : source.length;
+      continue;
+    }
     if (character === '"' || character === "'") {
       const end = quotedJavaScriptEnd(source, cursor, character);
       ranges.push([cursor, end, "string"]);

@@ -88,14 +88,39 @@ function attributesFrom(tag) {
   return attributes;
 }
 
+// A tag's attributes are parsed several times during one parseJsp call
+// (form, link and field loops, form-id counting, fieldset contexts,
+// evidence lookup), and attributeEntriesFrom walks the tag source
+// character by character. Tag objects are fresh per parse, are never
+// serialized, and no caller mutates the parsed attributes, so parsing
+// each tag's attributes once and sharing the result is exactly
+// equivalent and removes most of that repeated work. Whichever of the
+// entries or the map is needed first populates the shared entries.
+function attributeEntriesForTag(content, match) {
+  return match.attributeEntries ??= attributeEntriesFrom(sourceForMatch(content, match));
+}
+
+function attributesForTag(content, match) {
+  if (!match.attributes) {
+    const attributes = {};
+    for (const entry of attributeEntriesForTag(content, match)) attributes[entry.name] = entry.value;
+    match.attributes = attributes;
+  }
+  return match.attributes;
+}
+
+// Hoisted out of decodeHtmlEntities: the table was rebuilt on every
+// call (once per request URL and per field value), for no benefit.
+const NAMED_HTML_ENTITIES = new Map([
+  ["amp", "&"],
+  ["apos", "'"],
+  ["gt", ">"],
+  ["lt", "<"],
+  ["quot", '"'],
+]);
+
 function decodeHtmlEntities(value) {
-  const named = new Map([
-    ["amp", "&"],
-    ["apos", "'"],
-    ["gt", ">"],
-    ["lt", "<"],
-    ["quot", '"'],
-  ]);
+  const named = NAMED_HTML_ENTITIES;
   return String(value ?? "").replace(
     /&(?:#([0-9]+)|#x([0-9a-f]+)|([a-z]+));/giu,
     (match, decimal, hexadecimal, entityName) => {
@@ -145,7 +170,11 @@ function requestEvidence(locator, match, attributeName, source = match[0]) {
   let localOffset = 0;
   if (attributeName) {
     const wanted = attributeName.toLowerCase();
-    for (const attribute of attributeEntriesFrom(source)) {
+    // Reuse the tag's cached entries when they exist (populated by an
+    // earlier attributesForTag call for the same tag); otherwise scan
+    // once and cache, so a later attributes lookup reuses this scan.
+    const entries = match.attributeEntries ??= attributeEntriesFrom(source);
+    for (const attribute of entries) {
       if (attribute.name !== wanted) continue;
       localOffset = attribute.index;
       break;
@@ -429,7 +458,7 @@ function extractTaglibRequests(tags, formRanges, content, locator, pageWebPath) 
     if (match.closing || !requestTags.has(match.name)) continue;
     const tag = match.name;
     const source = sourceForMatch(content, match);
-    const attributes = attributesFrom(source);
+    const attributes = attributesForTag(content, match);
     const isStruts1 = tag.startsWith("html:");
     const isSpring = tag === "form:form";
     const isForm = tag.endsWith(":form");
@@ -525,7 +554,7 @@ function countFormIds(tags, content) {
   const counts = new Map();
   for (const match of tags) {
     if (match.closing || !FORM_TAG_NAMES.has(match.name)) continue;
-    const id = attributesFrom(sourceForMatch(content, match)).id;
+    const id = attributesForTag(content, match).id;
     if (!id) continue;
     counts.set(id, (counts.get(id) ?? 0) + 1);
   }
@@ -533,6 +562,13 @@ function countFormIds(tags, content) {
 }
 
 function decodeVisibleText(value) {
+  // Fast path for plain text, the common case: every replacement below
+  // needs one of $, & or < to trigger, and the whitespace collapse is
+  // a no-op when the only whitespace is single ordinary spaces (any
+  // other whitespace character would be collapsed to a space by the
+  // slow path, as would a run of two spaces). Leading/trailing spaces
+  // are still trimmed, exactly as the slow path's final trim does.
+  if (!/[$&<]/.test(value) && !/[^\S ]/.test(value) && !/  /.test(value)) return value.trim();
   return value
     .replace(/\$\{[^}]*}/g, " ")
     .replace(/&nbsp;/gi, " ")
@@ -645,7 +681,7 @@ function selectFieldValueState(openingTag, attributes, tags, content) {
   const options = optionBoundaries
     .flatMap((tag, index) => {
       if (tag.closing) return [];
-      const optionAttributes = attributesFrom(sourceForMatch(content, tag));
+      const optionAttributes = attributesForTag(content, tag);
       const bodyEnd = optionBoundaries[index + 1]?.index ?? end;
       const state = Object.hasOwn(optionAttributes, "value")
         ? fieldValueState(optionAttributes.value)
@@ -691,7 +727,7 @@ function disabledFieldsetContexts(tags, content) {
     if (tag.name !== "fieldset") continue;
     if (!tag.closing) {
       if (!tag.selfClosing) {
-        const attributes = attributesFrom(sourceForMatch(content, tag));
+        const attributes = attributesForTag(content, tag);
         stack.push({ tag, start: tag.end, disabled: Object.hasOwn(attributes, "disabled") });
       }
       continue;
@@ -744,7 +780,7 @@ export function parseJsp(content, filePath) {
   for (const match of tags) {
     if (match.closing || match.name !== "form") continue;
     const source = sourceForMatch(content, match);
-    const attributes = attributesFrom(source);
+    const attributes = attributesForTag(content, match);
     const target = markupRequestTarget(attributes.action ?? "", pageWebPath);
     if (!target.url) continue;
     requests.push({
@@ -762,7 +798,7 @@ export function parseJsp(content, filePath) {
   for (const match of tags) {
     if (match.closing || match.name !== "a") continue;
     const source = sourceForMatch(content, match);
-    const attributes = attributesFrom(source);
+    const attributes = attributesForTag(content, match);
     if (!Object.hasOwn(attributes, "href")) continue;
     const target = markupRequestTarget(attributes.href, pageWebPath);
     if (!target.url) continue;
@@ -786,7 +822,7 @@ export function parseJsp(content, filePath) {
   for (const match of tags) {
     if (match.closing || match.name !== "jsp:include") continue;
     const source = sourceForMatch(content, match);
-    const page = attributesFrom(source).page;
+    const page = attributesForTag(content, match).page;
     if (!page) continue;
     if (!markupRequestTarget(page, pageWebPath).url) continue;
     includes.push({ path: page, evidence: locator.at(match.index, source.length), offset: match.index });
@@ -794,7 +830,7 @@ export function parseJsp(content, filePath) {
   for (const match of tags) {
     if (match.closing || match.name !== "script") continue;
     const source = sourceForMatch(content, match);
-    const attributes = attributesFrom(source);
+    const attributes = attributesForTag(content, match);
     if (!isJavaScriptScript(attributes) || !Object.hasOwn(attributes, "src")) continue;
     const target = markupRequestTarget(attributes.src, pageWebPath);
     if (!target.url) continue;
@@ -810,7 +846,7 @@ export function parseJsp(content, filePath) {
   for (const match of tags) {
     if (match.closing || !nativeFieldTags.has(match.name)) continue;
     const source = sourceForMatch(content, match);
-    const attributes = attributesFrom(source);
+    const attributes = attributesForTag(content, match);
     if (!attributes.name) continue;
     const valueState = nativeFieldValueState(match, attributes, tags, content);
     if (valueState.sanitized) sanitizedFieldValues += 1;
@@ -856,7 +892,7 @@ export function parseJsp(content, filePath) {
   for (const match of tags) {
     if (match.closing || !taglibFieldTags.has(match.name)) continue;
     const source = sourceForMatch(content, match);
-    const attributes = attributesFrom(source);
+    const attributes = attributesForTag(content, match);
     const rawName = attributes.property
       ?? attributes.name
       ?? attributes.path
@@ -942,7 +978,7 @@ export function parseJsp(content, filePath) {
   const formTags = tags.filter((tag) => !tag.closing && FORM_TAG_NAMES.has(tag.name));
   const assignedFieldOffsets = new Set();
   for (const formTag of formTags) {
-    const formId = attributesFrom(sourceForMatch(content, formTag)).id;
+    const formId = attributesForTag(content, formTag).id;
     for (const field of fieldsForForm(
       formRanges.get(formTag.index) ?? null,
       formId,

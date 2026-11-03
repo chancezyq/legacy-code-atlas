@@ -97,26 +97,28 @@ function parseArguments(argv) {
   return { positional, json, output, queryFile, noMatchOk, mainThread };
 }
 
-async function writeIndex(graph, outputPath) {
+async function writeIndex(graph, outputPath, { pretty = false } = {}) {
   validateGraphIndex(graph);
   if (graph.summary.nodes === 0) {
     throw new Error("未生成任何可分析节点，请确认项目目录包含受支持的源码文件且当前用户可以读取");
   }
-  const serialized = serializeGraph(graph);
   // The index file itself is written compactly: it is a machine file and
   // the loader parses any valid JSON, so pretty-printing only buys
   // whitespace (and a larger file to write on every run). serializeGraph
   // itself stays pretty-printed on purpose: the benchmark and equivalence
   // checks deliberately compare its output byte-for-byte against the frozen
   // baseline, so changing it would silently weaken that determinism gate.
-  // The returned value is the pretty form, used only for --json stdout.
+  // The pretty form is computed only when a caller actually needs it
+  // (--json stdout); in text mode it used to be built and discarded on
+  // every run, which for a large graph means a second full serialization
+  // of tens of megabytes for nothing.
   const compact = `${JSON.stringify(graph)}\n`;
   const compactBytes = Buffer.byteLength(compact);
   if (compactBytes > MAX_GRAPH_INDEX_BYTES) {
     throw new Error("项目索引不能超过 512 MiB");
   }
   await writeFileAtomic(outputPath, Buffer.from(compact));
-  return serialized;
+  return pretty ? serializeGraph(graph) : compact;
 }
 
 function safeDiagnosticMessage(error) {
@@ -610,7 +612,7 @@ async function main() {
       ),
     });
     const graph = detailed.graph;
-    const serialized = await writeIndex(graph, outputPath);
+    const serialized = await writeIndex(graph, outputPath, { pretty: json });
     if (json) process.stdout.write(serialized);
     else {
       const { timings, stats } = detailed;

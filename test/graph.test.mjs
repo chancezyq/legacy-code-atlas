@@ -623,3 +623,46 @@ test("published JSON Schema covers the graph contract", async () => {
   assert.equal(schema.$defs.edge.properties.type.enum.includes("redirects_to"), true);
   assert.equal(schema.$defs.edge.properties.type.enum.includes("extends_tile"), true);
 });
+
+test("graph copies clean evidence and still sanitizes dirty evidence", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const clean = { file: "web/a.jsp", line: 3, column: 2, snippet: "<form action='/save'>" };
+  const cleanNode = graph.addNode({ type: "page", key: "web/a.jsp", name: "a.jsp", evidence: [clean] });
+  // The stored copy must not alias the caller's object.
+  clean.snippet = "mutated";
+  assert.equal(cleanNode.evidence[0].snippet, "<form action='/save'>");
+
+  const dirty = { file: "web\\b.jsp", line: 1, column: 1, snippet: "ab" };
+  const dirtyNode = graph.addNode({ type: "page", key: "web/b.jsp", name: "b.jsp", evidence: [dirty] });
+  assert.equal(dirtyNode.evidence[0].file, "web/b.jsp");
+  assert.equal(dirtyNode.evidence[0].snippet, "a b");
+  assert.doesNotThrow(() => validateGraphIndex(graph.toJSON()));
+});
+
+test("graph duplicate edge returns the stored edge without re-normalizing", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const source = graph.addNode({ type: "page", key: "web/a.jsp", name: "a.jsp" });
+  const target = graph.addNode({ type: "route", key: "/save", name: "/save" });
+  const first = graph.addEdge({
+    source: source.id,
+    target: target.id,
+    type: "submits_to",
+    confidence: 1,
+    reason: "form",
+    evidence: [{ file: "web/a.jsp", line: 1, column: 1, snippet: "<form>" }],
+  });
+  const duplicate = graph.addEdge({
+    source: source.id,
+    target: target.id,
+    type: "submits_to",
+    confidence: 0.5,
+    reason: "form",
+    evidence: [{ file: "web/a.jsp", line: 9, column: 9, snippet: "xy" }],
+    data: { method: "GET" },
+  });
+  assert.equal(duplicate, first);
+  assert.equal(first.confidence, 1);
+  assert.deepEqual(first.evidence, [{ file: "web/a.jsp", line: 1, column: 1, snippet: "<form>" }]);
+  assert.deepEqual(first.data, {});
+  assert.equal(graph.toJSON().edges.length, 1);
+});

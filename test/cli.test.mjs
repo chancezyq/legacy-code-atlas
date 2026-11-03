@@ -1184,3 +1184,23 @@ test("CLI ignores linked cache contents and replaces only the project-local cach
     assert.equal(Number((await stat(cachePath)).nlink), 1);
   }
 });
+
+test("CLI analyze --json still prints the pretty graph while the index file stays compact", async (t) => {
+  const project = await projectCopy(t);
+  const result = await run(process.execPath, [cli, "analyze", project, "--json"]);
+  const indexText = await readFile(path.join(project, ".legacy-code-atlas", "index.json"), "utf8");
+
+  assert.deepEqual(JSON.parse(result.stdout), JSON.parse(indexText));
+  assert.match(result.stdout, /\n  "nodes"/);
+  assert.equal(indexText.trim().includes("\n  "), false);
+});
+
+test("CLI computes the pretty index only for --json stdout", async () => {
+  const source = await readFile(cli, "utf8");
+  const functionStart = source.indexOf("async function writeIndex");
+  const functionEnd = source.indexOf("\n}\n\nfunction safeDiagnosticMessage", functionStart);
+  const writeIndex = source.slice(functionStart, functionEnd);
+
+  assert.match(writeIndex, /return pretty \? serializeGraph\(graph\) : compact/);
+  assert.equal(writeIndex.indexOf("const serialized = serializeGraph"), -1);
+});

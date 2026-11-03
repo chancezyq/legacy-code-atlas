@@ -1,7 +1,7 @@
 import { compareLocale } from "./compare.mjs";
 import { normalizePath } from "./evidence.mjs";
 import { MAX_EVIDENCE_SNIPPET_CHARACTERS, MAX_SEARCH_TEXT_CHARACTERS } from "./index-validation.mjs";
-import { replaceUnsafeTextControls } from "./text-safety.mjs";
+import { containsUnsafeTextControl, replaceUnsafeTextControls } from "./text-safety.mjs";
 
 const SEARCH_TEXT_CHUNK_OVERLAP_CHARACTERS = 2 * 1024;
 const nodeStates = new WeakMap();
@@ -14,8 +14,31 @@ function normalizeKey(key) {
   return normalizePath(String(key).trim());
 }
 
+// Fast path for the overwhelmingly common evidence shape: a plain, flat
+// object whose file is already normalized and whose snippet is already
+// clean and short. For such entries the slow path's deep clone, path
+// normalization and control-character scan all reproduce the entry
+// unchanged, so a shallow copy is exactly equivalent and much cheaper.
+// Anything else (proxies, nested values, dirty or overlong snippets,
+// non-string fields) falls through to the slow path unchanged.
+function isCleanEvidenceEntry(entry) {
+  if (entry === null || typeof entry !== "object") return false;
+  if (observableByProxy.has(entry)) return false;
+  const prototype = Object.getPrototypeOf(entry);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (typeof entry.file !== "string"
+    || entry.file.includes("\\")
+    || entry.file.startsWith("./")) return false;
+  if (typeof entry.snippet !== "string"
+    || entry.snippet.length > MAX_EVIDENCE_SNIPPET_CHARACTERS
+    || containsUnsafeTextControl(entry.snippet)) return false;
+  return Object.values(entry).every((value) => value === null
+    || (typeof value !== "object" && typeof value !== "function"));
+}
+
 function normalizeEvidence(evidence = []) {
   return evidence.map((entry) => {
+    if (isCleanEvidenceEntry(entry)) return { ...entry };
     const snapshot = cloneValue(entry);
     const normalized = {
       ...snapshot,
@@ -373,8 +396,19 @@ export class GraphBuilder {
     }
 
     current = itemState.array;
+    // The key is computed exactly once per call. The state was just
+    // verified clean above (same array, same length, not dirty), so a
+    // key hit whose stored item is still at its recorded index is a
+    // genuine duplicate and can return without cloning. For a new item
+    // the same key is reused below: cloning preserves keys, values and
+    // toJSON behavior, so stringifying the clone would yield the same
+    // key, and a second stringify would double the key work per item.
+    const key = JSON.stringify(item);
+    const fastExisting = itemState.itemsByKey.get(key);
+    if (fastExisting && current[fastExisting.index] === fastExisting.item) {
+      return fastExisting.original;
+    }
     const stored = observable(cloneValue(item), itemState.markDirty);
-    const key = JSON.stringify(stored);
     let existing = itemState.itemsByKey.get(key);
     if (existing
       && (current[existing.index] !== existing.item || JSON.stringify(existing.item) !== key)) {
@@ -401,6 +435,12 @@ export class GraphBuilder {
       throw new TypeError("edge confidence must be between 0 and 1");
     }
     const id = `${source}|${type}|${target}|${reason}`;
+    // Existing edges are returned unchanged and their evidence is never
+    // merged, so normalizing the incoming evidence first would be pure
+    // waste on the duplicate path (the common case when many pages link
+    // to the same route). normalizeEvidence is side-effect free, so
+    // checking first cannot change the result.
+    if (this.edges.has(id)) return this.edges.get(id);
     const edge = {
       id,
       source,
@@ -411,11 +451,9 @@ export class GraphBuilder {
       evidence: normalizeEvidence(evidence),
       data,
     };
-    if (!this.edges.has(id)) {
-      this.edges.set(id, edge);
-      edgeStates.set(edge, createEdgeState(edge));
-    }
-    return this.edges.get(id);
+    this.edges.set(id, edge);
+    edgeStates.set(edge, createEdgeState(edge));
+    return edge;
   }
 
   addEdgeEvidence(edgeOrId, evidence = []) {

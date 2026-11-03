@@ -1144,3 +1144,30 @@ test("JSP parser treats Struts anchor values as labels instead of URLs", () => {
     ["link", "/order/help.action"],
   ]);
 });
+
+test("JSP parser keeps per-tag attributes separate when several forms share a page", () => {
+  const result = parseJsp([
+    '<form id="first" action="/first.do" method="post"><input name="alpha" value="1"></form>',
+    '<form id="second" action="/second.do" method="post"><input name="beta" value="2"></form>',
+    '<a href="/first.do">again</a>',
+  ].join("\n"), "web/multi.jsp");
+
+  assert.deepEqual(
+    result.requests.filter((request) => request.kind === "form").map((request) => [request.url, request.parameters]),
+    [
+      ["/first.do", { alpha: "1" }],
+      ["/second.do", { beta: "2" }],
+    ],
+  );
+  assert.deepEqual(result.fields.map((field) => field.name), ["alpha", "beta"]);
+});
+
+test("JSP parser normalizes visible text the same way for plain and marked-up text", () => {
+  const result = parseJsp([
+    "<p>Hello World</p>",
+    "<p>multi",
+    "line&nbsp;text</p>",
+  ].join("\n"), "web/text.jsp");
+
+  assert.equal(result.visibleText, "Hello World multi line text");
+});
