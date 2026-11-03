@@ -47,7 +47,7 @@ When all three commands succeed, summarize the compatibility check, index status
 
 ## Shareable documents
 
-When the user invokes `/atlas docs` — the only permitted argument form — or asks in ordinary language for shareable or guidance documents about the analyzed project (use case specifications (UCS), UI specifications (UIS), diagrams, or similar wording such as 用例文档、界面文档、系统图、分享文档), first check for the project index `.legacy-code-atlas/index.json` with the same metadata-only existence check as above. If the index is missing, tell the user to run `/atlas` by itself first and stop.
+When the user invokes `/atlas docs` — the only permitted argument form — or asks in ordinary language for shareable or guidance documents about the analyzed project (use case specifications (UCS), UI specifications (UIS), diagrams, or similar wording such as 用例文档、界面文档、系统图、分享文档), first check for the project index `.legacy-code-atlas/index.json` with the same metadata-only existence check as above. If the index is missing, tell the user to run `/atlas` by itself first and stop. Some hosts' glob implementations silently skip dot-prefixed directories, so a negative result for `.legacy-code-atlas` is not conclusive on its own. Before reporting the index as missing, confirm with a metadata-only directory listing that includes hidden entries (on a PowerShell host, a listing with hidden entries shown, for example `Get-ChildItem -Force`, sees a dot-prefixed directory); only report the index as missing if that listing also finds nothing. This confirmation lists names only; do not open the index file.
 
 Once the index exists, run this one fixed command as a single Shell call:
 
@@ -77,7 +77,7 @@ Never place the module or feature text in the command line. A candidate that exa
 
 When the user asks in ordinary language for one detailed technical workflow, technical design, processing-flow analysis, or attachment-style implementation document for a single business feature, use this model-assisted workflow. This differs from `/atlas docs`: Atlas extracts a bounded evidence dossier, the company's existing model writes the explanation, and Atlas validates the final file. Never invoke a model API from Node.js.
 
-First perform the same metadata-only check for `.legacy-code-atlas/index.json`. If it is missing, tell the user to run `/atlas` by itself and stop. Derive one concise source-language feature candidate such as `OrderAudit`; do not use the whole user message. Run the fixed query-file preflight:
+First perform the same metadata-only check for `.legacy-code-atlas/index.json`. If it is missing, tell the user to run `/atlas` by itself and stop. Some hosts' glob implementations silently skip dot-prefixed directories, so a negative result for `.legacy-code-atlas` is not conclusive on its own. Before reporting the index as missing, confirm with a metadata-only directory listing that includes hidden entries (on a PowerShell host, a listing with hidden entries shown, for example `Get-ChildItem -Force`, sees a dot-prefixed directory); only report the index as missing if that listing also finds nothing. This confirmation lists names only; do not open the index file. Derive one concise source-language feature candidate such as `OrderAudit`; do not use the whole user message. Run the fixed query-file preflight:
 
 ```sh
 node "$HOME/.legacy-code-atlas/bin/legacy-code-atlas.mjs" prepare-query "$PWD"
@@ -113,6 +113,8 @@ Before handling any later question, check for the project-local index at `.legac
 
 - If the project index `.legacy-code-atlas/index.json` exists, continue directly with the ordinary-question flow below; do not require another `/atlas` invocation.
 - If the project index `.legacy-code-atlas/index.json` is missing, tell the user to run `/atlas` by itself and wait for it to succeed before asking the question again.
+
+Some hosts' glob implementations silently skip dot-prefixed directories, so a negative result for `.legacy-code-atlas` is not conclusive on its own. Before reporting the index as missing, confirm with a metadata-only directory listing that includes hidden entries (on a PowerShell host, a listing with hidden entries shown, for example `Get-ChildItem -Force`, sees a dot-prefixed directory); only report the index as missing if that listing also finds nothing. This confirmation lists names only; do not open the index file.
 
 Do not run any trace command without a valid index or while the index is missing.
 

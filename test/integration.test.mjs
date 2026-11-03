@@ -686,3 +686,23 @@ test("documentation states the current analyzer and data-safety limits", async (
   assert.match(readme, /npm run benchmark/);
   assert.match(readme, /至少比 baseline 快 `3\.00x`/);
 });
+
+test("index existence checks warn that glob may skip dot-prefixed directories", async () => {
+  const files = [
+    "../integrations/opencode/skills/atlas/SKILL.md",
+    "../integrations/opencode/AGENTS.fragment.md",
+    "../integrations/opencode/commands/legacy-find.md",
+    "../integrations/opencode/commands/legacy-table.md",
+  ];
+
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(source, /dot-prefixed/, `${file} must warn about dot-prefixed directories`);
+    assert.match(source, /hidden entries/, `${file} must require a listing that includes hidden entries`);
+    assert.match(
+      source,
+      /only report[^\n]+missing[^\n]+listing[^\n]+finds nothing/i,
+      `${file} must not report missing on a negative glob alone`,
+    );
+  }
+});
