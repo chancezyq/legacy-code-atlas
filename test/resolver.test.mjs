@@ -1130,3 +1130,40 @@ test("resolver uses the servlet service convention without request hints", () =>
   const dispatches = [...graph.edges.values()].filter((edge) => edge.type === "dispatches_to");
   assert.deepEqual(dispatches.map((edge) => [edge.target, edge.reason]), [[servlet.methods[0].node.id, "Servlet service convention"]]);
 });
+
+test("resolver strips each generic segment without dropping a member type", () => {
+  const graph = new GraphBuilder({ projectRoot: "/repo" });
+  const member = type(graph, "com.acme.Outer.Inner", [
+    { name: "work", arity: 0, line: 1 },
+  ], {
+    name: "Inner",
+    canonicalName: "com.acme.Outer.Inner",
+    topLevel: false,
+    staticMember: true,
+  });
+  const caller = type(graph, "caller.Caller", [
+    { name: "run", arity: 0, line: 3 },
+  ]);
+  const callerFile = javaFile([caller], {
+    packageName: "caller",
+    imports: [],
+    fields: [{ ownerType: caller.fullName, name: "service", type: "com.acme.Outer<java.lang.String>.Inner<java.lang.Integer>" }],
+    calls: [{
+      ownerType: caller.fullName,
+      receiver: "service",
+      method: "work",
+      enclosingMethod: "run",
+      evidence: { file: "Caller.java", line: 4, column: 1, snippet: "service.work()" },
+    }],
+  });
+  resolveFacts(graph, {
+    javaFiles: [javaFile([member]), callerFile],
+    statements: [],
+    routeTargets: [],
+  });
+  const callEdges = [...graph.edges.values()].filter((edge) => edge.type === "calls");
+  assert.deepEqual(callEdges.map(({ source, target }) => [source, target]), [[
+    caller.methods[0].node.id,
+    member.methods[0].node.id,
+  ]]);
+});

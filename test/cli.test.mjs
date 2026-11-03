@@ -41,8 +41,10 @@ test("CLI checks serialized index size before allocating its output Buffer", asy
   const functionStart = source.indexOf("async function writeIndex");
   const functionEnd = source.indexOf("\n}\n\nfunction safeDiagnosticMessage", functionStart);
   const writeIndex = source.slice(functionStart, functionEnd);
-  const byteLengthCheck = writeIndex.indexOf("Buffer.byteLength(serialized)");
-  const bufferAllocation = writeIndex.indexOf("Buffer.from(serialized)");
+  // The file is written compactly, so the size check and allocation both
+  // refer to the compact payload, not the pretty serializeGraph output.
+  const byteLengthCheck = writeIndex.indexOf("Buffer.byteLength(compact)");
+  const bufferAllocation = writeIndex.indexOf("Buffer.from(compact)");
 
   assert.notEqual(byteLengthCheck, -1);
   assert.notEqual(bufferAllocation, -1);
@@ -358,6 +360,76 @@ test("CLI analyzes a project and writes the default deterministic index", async 
   assert.match(first.stdout, /index\.json/);
   assert.match(second.stdout, /分析完成/);
   assert.equal(firstIndex, secondIndex);
+});
+
+test("CLI analyze summary reports reuse, timings and diagnostics on rerun", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const second = await run(process.execPath, [cli, "analyze", project]);
+
+  assert.match(second.stdout, /缓存复用 [1-9]/);
+  assert.match(second.stdout, /用时：\d+(\.\d+)?ms（扫描 \d+(\.\d+)?ms \/ 分批 \d+(\.\d+)?ms \/ 处理 \d+(\.\d+)?ms \/ 物化 \d+(\.\d+)?ms）/);
+  assert.match(second.stdout, /诊断：\d+ 条/);
+});
+
+test("CLI analyze summary surfaces warning and unresolved counts", async (t) => {
+  const project = await projectCopy(t);
+  const first = await run(process.execPath, [cli, "analyze", project]);
+
+  // The fixture deliberately contains unresolved targets; previously these
+  // were only visible inside index.json, not in the analyze summary.
+  assert.match(first.stdout, /警告：5 条，其中未解析 5 条/);
+});
+
+test("CLI analyze writes a compact index that still loads for queries", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  const indexPath = path.join(project, ".legacy-code-atlas", "index.json");
+  const payload = await readFile(indexPath, "utf8");
+  // One payload line (plus the trailing newline): pretty-printing would add
+  // an indented line per node, edge, and field.
+  assert.equal(payload.trim().split("\n").length, 1);
+  const parsed = JSON.parse(payload);
+  assert.equal(parsed.schemaVersion, "1.0.0");
+  assert.ok(parsed.summary.nodes > 0);
+  const search = await run(process.execPath, [cli, "search", project, "order"]);
+  assert.match(search.stdout, /搜索/);
+});
+
+test("CLI docs summary warns when the document model is truncated", async (t) => {
+  const project = await projectCopy(t);
+  await run(process.execPath, [cli, "analyze", project]);
+  await mutateStandardIndex(project, (graph) => {
+    const backend = graph.nodes.find((node) => node.type === "java_method");
+    for (let index = 0; index < 201; index += 1) {
+      const routeId = `route:/generated/u${index}.do`;
+      graph.nodes.push({
+        id: routeId,
+        type: "route",
+        name: `/generated/u${index}.do`,
+        evidence: [{ file: "web/a.jsp", line: 1, column: 1, snippet: "x" }],
+        data: {},
+        searchText: [],
+      });
+      graph.edges.push({
+        id: `dispatch:${index}`,
+        source: routeId,
+        target: backend.id,
+        type: "dispatches_to",
+        confidence: 1,
+        reason: "configured route",
+        evidence: [{ file: "routes.xml", line: index + 1, column: 1, snippet: "route" }],
+        data: {},
+      });
+    }
+    graph.summary.nodes = graph.nodes.length;
+    graph.summary.edges = graph.edges.length;
+    graph.summary.nodeTypes.route = (graph.summary.nodeTypes.route ?? 0) + 201;
+    graph.summary.edgeTypes.dispatches_to = (graph.summary.edgeTypes.dispatches_to ?? 0) + 201;
+  });
+  const docs = await run(process.execPath, [cli, "docs", project]);
+
+  assert.match(docs.stdout, /注意：文档已截断，用例 200\//);
 });
 
 test("CLI rejects an empty analysis target instead of writing a successful empty index", async (t) => {

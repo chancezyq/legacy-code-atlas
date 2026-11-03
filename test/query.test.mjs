@@ -5,7 +5,7 @@ import { analyzeProject } from "../src/analyzer.mjs";
 import { renderTraceMarkdown } from "../src/render.mjs";
 import { parseFileBuffer } from "../src/file-facts.mjs";
 import { materializeRecords } from "../src/materializer.mjs";
-import { searchGraph, traceFeature, traceProcedure, traceStatement, traceTable, traceUrl } from "../src/query.mjs";
+import { searchGraph, traceFeature, traceProcedure, traceStatement, traceTable, traceUrl, traverseGraph } from "../src/query.mjs";
 
 const projectRoot = new URL("./fixtures/legacy-shop", import.meta.url).pathname;
 
@@ -718,4 +718,66 @@ test("URL traces include Tiles forwards and Struts 2 redirects", () => {
   assert.equal(tile.nodes.some((node) => node.id === "tiles_definition:order.page"), true);
   assert.equal(tile.nodes.some((node) => node.id === "page:web/layout.jsp"), true);
   assert.equal(redirect.nodes.some((node) => node.id === "route:/order/review.action"), true);
+});
+
+test("search and traversal caches rebuild when the graph arrays are replaced", () => {
+  const graph = {
+    nodes: [
+      { id: "page:web/a.jsp", type: "page", name: "a.jsp", searchText: ["a"] },
+      { id: "page:web/b.jsp", type: "page", name: "b.jsp", searchText: ["b"] },
+    ],
+    edges: [],
+    warnings: [],
+  };
+  assert.equal(searchGraph(graph, "b")[0]?.id, "page:web/b.jsp");
+  assert.equal(traverseGraph(graph, ["page:web/a.jsp"]).nodes.length, 1);
+
+  // Swapping the array reference (not mutating it in place) is the signal
+  // the per-graph caches use to rebuild; a stale cache would miss both.
+  graph.nodes = [
+    ...graph.nodes,
+    { id: "page:web/c.jsp", type: "page", name: "c.jsp", searchText: ["c"] },
+  ];
+  graph.edges = [{
+    id: "e1",
+    source: "page:web/a.jsp",
+    target: "page:web/c.jsp",
+    type: "links_to",
+    confidence: 1,
+    reason: "",
+    evidence: [],
+  }];
+  assert.equal(searchGraph(graph, "c")[0]?.id, "page:web/c.jsp");
+  assert.equal(traverseGraph(graph, ["page:web/a.jsp"]).nodes.some((node) => node.id === "page:web/c.jsp"), true);
+});
+
+test("traversal terminates on a long cyclic graph without quadratic path copies", () => {
+  const size = 2000;
+  const nodes = Array.from({ length: size }, (_, index) => ({
+    id: `page:web/p${index}.jsp`,
+    type: "page",
+    name: `p${index}.jsp`,
+    searchText: [`p${index}`],
+  }));
+  const edges = [];
+  for (let index = 0; index < size; index += 1) {
+    edges.push({
+      id: `e${index}`,
+      source: nodes[index].id,
+      target: nodes[(index + 1) % size].id,
+      type: "links_to",
+      confidence: 1,
+      reason: "",
+      evidence: [],
+    });
+  }
+  const graph = { nodes, edges, warnings: [] };
+  const startedAt = performance.now();
+  // The default depth limit is 14, so a 2000-node chain needs an explicit
+  // depth limit; the point here is termination and linear queue cost, not
+  // the default query depth.
+  const result = traverseGraph(graph, [nodes[0].id], { maxStates: 5000, maxDepth: 2000 });
+  const elapsedMs = performance.now() - startedAt;
+  assert.equal(result.nodes.length, size);
+  assert.ok(elapsedMs < 5000, `cyclic traversal of ${size} nodes took ${elapsedMs.toFixed(1)} ms`);
 });

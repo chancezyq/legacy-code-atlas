@@ -1,52 +1,143 @@
+import { compareLocale } from "./compare.mjs";
+
 function normalize(value) {
   return String(value ?? "").normalize("NFKC").toLowerCase().trim();
 }
 
 const DEFAULT_MAX_TRAVERSAL_STATES = 5_000;
 
-function normalizedSearchText(node) {
-  return (node.searchText ?? []).filter(Boolean).map(normalize);
+// Per-graph search index, cached by graph object identity. The graph objects
+// passed to search/traverse are the immutable output of materialization
+// (graph.toJSON()), so caching normalized values is safe as long as the
+// nodes array reference itself has not been replaced. If a caller mutates
+// the graph by swapping the nodes array, the cache is rebuilt.
+const searchIndexes = new WeakMap();
+
+function searchIndexFor(graph) {
+  const cached = searchIndexes.get(graph);
+  if (cached && cached.nodes === graph.nodes) return cached;
+  const entries = graph.nodes.map((node) => {
+    const name = normalize(node.name);
+    const id = normalize(node.id);
+    const searchText = (node.searchText ?? []).filter(Boolean).map(normalize);
+    const values = [node.name, node.id, node.filePath].filter(Boolean).map(normalize).concat(searchText);
+    return { node, name, id, searchText, values };
+  });
+  const index = { nodes: graph.nodes, entries };
+  searchIndexes.set(graph, index);
+  return index;
 }
 
-function searchableValues(node, searchText) {
-  return [node.name, node.id, node.filePath].filter(Boolean).map(normalize).concat(searchText);
-}
-
-function scoreNode(node, term, tokens) {
+function scoreEntry(entry, term, tokens) {
   if (!term) return 0;
-  const name = normalize(node.name);
-  const id = normalize(node.id);
-  if (name === term) return 1000;
-  if (id === term || id.endsWith(`:${term}`)) return 950;
-  if (name.includes(term)) return 850;
-  if (id.includes(term)) return 800;
-  const searchText = normalizedSearchText(node);
+  if (entry.name === term) return 1000;
+  if (entry.id === term || entry.id.endsWith(`:${term}`)) return 950;
+  if (entry.name.includes(term)) return 850;
+  if (entry.id.includes(term)) return 800;
   let score = 0;
-  for (const value of searchableValues(node, searchText)) {
+  for (const value of entry.values) {
     if (value === term) score = Math.max(score, 750);
     else if (value.includes(term)) score = Math.max(score, 650);
     else if (tokens.length && tokens.every((token) => value.includes(token))) score = Math.max(score, 500);
   }
-  if (tokens.length && tokens.every((token) => searchText.some((value) => value.includes(token)))) {
+  if (tokens.length && tokens.every((token) => entry.searchText.some((value) => value.includes(token)))) {
     score = Math.max(score, 500);
   }
   return score;
+}
+
+function compareResults(left, right) {
+  return right.score - left.score || compareLocale(left.node.id, right.node.id);
+}
+
+// The heap top is the worst entry currently kept: lowest score, and for
+// equal scores the largest id (final order prefers the smallest id).
+function isWorse(left, right) {
+  return left.score < right.score
+    || (left.score === right.score &&compareLocale(left.node.id, right.node.id) > 0);
+}
+
+function heapPush(heap, item) {
+  heap.push(item);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = (index - 1) >> 1;
+    if (!isWorse(heap[index], heap[parent])) break;
+    [heap[index], heap[parent]] = [heap[parent], heap[index]];
+    index = parent;
+  }
+}
+
+function heapReplaceTop(heap, item) {
+  heap[0] = item;
+  let index = 0;
+  for (;;) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let worst = index;
+    if (left < heap.length && isWorse(heap[left], heap[worst])) worst = left;
+    if (right < heap.length && isWorse(heap[right], heap[worst])) worst = right;
+    if (worst === index) break;
+    [heap[index], heap[worst]] = [heap[worst], heap[index]];
+    index = worst;
+  }
 }
 
 export function searchGraph(graph, query, options = {}) {
   const allowedTypes = options.types ? new Set(options.types) : null;
   const term = normalize(query);
   const tokens = term.split(/\s+/).filter(Boolean);
-  return graph.nodes
-    .filter((node) => !allowedTypes || allowedTypes.has(node.type))
-    .map((node) => ({ ...node, score: scoreNode(node, term, tokens) }))
-    .filter((node) => node.score > 0)
-    .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id, "en"))
-    .slice(0, options.limit ?? 25);
+  const limit = options.limit ?? 25;
+  if (limit === 0) return [];
+  const { entries } = searchIndexFor(graph);
+  // Top-K selection avoids a full sort of every scored node. The heap keeps
+  // only `limit` entries, so repeated searches over a large graph stay
+  // O(N log limit) instead of O(N log N), and unscored nodes are never copied.
+  if (!Number.isInteger(limit) || limit < 0) {
+    return entries
+      .filter((entry) => !allowedTypes || allowedTypes.has(entry.node.type))
+      .map((entry) => ({ ...entry.node, score: scoreEntry(entry, term, tokens) }))
+      .filter((node) => node.score > 0)
+      .sort((left, right) => right.score - left.score || compareLocale(left.id, right.id))
+      .slice(0, limit);
+  }
+  const heap = [];
+  for (const entry of entries) {
+    if (allowedTypes && !allowedTypes.has(entry.node.type)) continue;
+    const score = scoreEntry(entry, term, tokens);
+    if (score <= 0) continue;
+    const result = { node: entry.node, score };
+    if (heap.length < limit) {
+      heapPush(heap, result);
+    } else if (isWorse(heap[0], result)) {
+      heapReplaceTop(heap, result);
+    }
+  }
+  return heap
+    .sort(compareResults)
+    .map(({ node, score }) => ({ ...node, score }));
 }
 
-function adjacency(graph, direction, allowedEdgeTypes) {
-  const map = new Map();
+// Adjacency lists are rebuilt only once per graph object, direction and
+// edge-type filter. Trace calls (especially split incoming+outgoing traces)
+// previously rebuilt and re-sorted the same lists on every traversal.
+const adjacencyCaches = new WeakMap();
+
+function cachedAdjacency(graph, direction, allowedEdgeTypes) {
+  let perGraph = adjacencyCaches.get(graph);
+  if (!perGraph || perGraph.nodes !== graph.nodes || perGraph.edges !== graph.edges) {
+    perGraph = {
+      nodes: graph.nodes,
+      edges: graph.edges,
+      nodeById: new Map(graph.nodes.map((node) => [node.id, node])),
+      entries: new Map(),
+    };
+    adjacencyCaches.set(graph, perGraph);
+  }
+  const key = `${direction}|${allowedEdgeTypes ? [...allowedEdgeTypes].sort().join(",") : ""}`;
+  let map = perGraph.entries.get(key);
+  if (map) return { map, nodeById: perGraph.nodeById };
+  map = new Map();
   const push = (from, to, edge) => {
     const entries = map.get(from) ?? [];
     entries.push({ to, edge });
@@ -57,8 +148,33 @@ function adjacency(graph, direction, allowedEdgeTypes) {
     if (direction === "outgoing" || direction === "both") push(edge.source, edge.target, edge);
     if (direction === "incoming" || direction === "both") push(edge.target, edge.source, edge);
   }
-  for (const entries of map.values()) entries.sort((left, right) => left.edge.id.localeCompare(right.edge.id, "en"));
-  return map;
+  for (const entries of map.values()) entries.sort((left, right) => compareLocale(left.edge.id, right.edge.id));
+  perGraph.entries.set(key, map);
+  return { map, nodeById: perGraph.nodeById };
+}
+
+function reconstructPath(entry) {
+  const nodes = [];
+  const edges = [];
+  const edgeIds = [];
+  for (let current = entry; current; current = current.parent) {
+    nodes.push(current.current);
+    if (current.edgeType !== undefined) {
+      edges.push(current.edgeType);
+      edgeIds.push(current.edgeId);
+    }
+  }
+  nodes.reverse();
+  edges.reverse();
+  edgeIds.reverse();
+  return { nodes, edges, edgeIds };
+}
+
+function pathIncludes(entry, target) {
+  for (let current = entry; current; current = current.parent) {
+    if (current.current === target) return true;
+  }
+  return false;
 }
 
 function traverse(graph, startIds, options = {}) {
@@ -67,12 +183,14 @@ function traverse(graph, startIds, options = {}) {
   const maxPaths = options.maxPaths ?? 100;
   const maxStates = options.maxStates ?? DEFAULT_MAX_TRAVERSAL_STATES;
   const allowedEdgeTypes = options.allowedEdgeTypes ? new Set(options.allowedEdgeTypes) : null;
-  const adjacent = adjacency(graph, direction, allowedEdgeTypes);
-  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const { map: adjacent, nodeById } = cachedAdjacency(graph, direction, allowedEdgeTypes);
   const visitedNodes = new Set(startIds);
   const visitedEdges = new Set();
   const paths = [];
-  const queue = startIds.map((id) => ({ current: id, nodes: [id], edges: [], edgeIds: [] }));
+  // Queue entries are parent pointers, not copied node/edge arrays: expanding
+  // a path is O(1) instead of O(depth), and full arrays are reconstructed
+  // only for paths that actually terminate or hit the state limit.
+  const queue = startIds.map((id) => ({ current: id, parent: null, depth: 0, nodesLength: 1 }));
   let queueIndex = 0;
   let statesExpanded = 0;
   let statesEnqueued = queue.length;
@@ -92,8 +210,8 @@ function traverse(graph, startIds, options = {}) {
     queue[queueIndex] = null;
     queueIndex += 1;
     statesExpanded += 1;
-    const next = (adjacent.get(path.current) ?? []).filter((entry) => !path.nodes.includes(entry.to));
-    const depthLimited = next.length > 0 && path.edges.length >= maxDepth;
+    const next = (adjacent.get(path.current) ?? []).filter((entry) => !pathIncludes(path, entry.to));
+    const depthLimited = next.length > 0 && path.depth >= maxDepth;
     const isTerminal = next.length === 0
       || depthLimited
       || (direction !== "incoming" && nodeById.get(path.current)?.type === "table");
@@ -102,11 +220,9 @@ function traverse(graph, startIds, options = {}) {
         truncated = true;
         depthLimitReached = true;
       }
-      if (path.nodes.length > 1) {
+      if (path.nodesLength > 1) {
         paths.push({
-          nodes: path.nodes,
-          edges: path.edges,
-          edgeIds: path.edgeIds,
+          ...reconstructPath(path),
           ...(depthLimited ? { truncated: true } : {}),
         });
       }
@@ -123,9 +239,11 @@ function traverse(graph, startIds, options = {}) {
       visitedEdges.add(entry.edge.id);
       queue.push({
         current: entry.to,
-        nodes: [...path.nodes, entry.to],
-        edges: [...path.edges, entry.edge.type],
-        edgeIds: [...path.edgeIds, entry.edge.id],
+        parent: path,
+        edgeType: entry.edge.type,
+        edgeId: entry.edge.id,
+        depth: path.depth + 1,
+        nodesLength: path.nodesLength + 1,
       });
       statesEnqueued += 1;
     }
@@ -137,9 +255,10 @@ function traverse(graph, startIds, options = {}) {
   }
   if (stateLimitReached && paths.length < maxPaths) {
     const frontier = [haltedPath, ...queue.slice(queueIndex)]
-      .filter((path) => path?.nodes.length > 1)
+      .filter((path) => path?.nodesLength > 1)
+      .map((path) => reconstructPath(path))
       .sort((left, right) => right.nodes.length - left.nodes.length
-        || left.nodes.join().localeCompare(right.nodes.join(), "en"));
+        || compareLocale(left.nodes.join(), right.nodes.join()));
     const seen = new Set(paths.map((path) => `${path.nodes.join("|")}|${path.edgeIds.join("|")}`));
     for (const path of frontier) {
       const key = `${path.nodes.join("|")}|${path.edgeIds.join("|")}`;
@@ -157,7 +276,7 @@ function traverse(graph, startIds, options = {}) {
   return {
     nodes: graph.nodes.filter((node) => visitedNodes.has(node.id)),
     edges: graph.edges.filter((edge) => visitedEdges.has(edge.id)),
-    paths: paths.sort((left, right) => right.nodes.length - left.nodes.length || left.nodes.join().localeCompare(right.nodes.join(), "en")),
+    paths: paths.sort((left, right) => right.nodes.length - left.nodes.length || compareLocale(left.nodes.join(), right.nodes.join())),
     truncated,
     stateLimit: maxStates,
     pathLimit: maxPaths,
@@ -202,9 +321,9 @@ function mergeTraversals(...traversals) {
     statesEnqueued += traversal.statesEnqueued;
   }
   return {
-    nodes: [...nodes.values()].sort((left, right) => left.id.localeCompare(right.id, "en")),
-    edges: [...edges.values()].sort((left, right) => left.id.localeCompare(right.id, "en")),
-    paths: [...paths.values()].sort((left, right) => right.nodes.length - left.nodes.length || left.nodes.join().localeCompare(right.nodes.join(), "en")),
+    nodes: [...nodes.values()].sort((left, right) => compareLocale(left.id, right.id)),
+    edges: [...edges.values()].sort((left, right) => compareLocale(left.id, right.id)),
+    paths: [...paths.values()].sort((left, right) => right.nodes.length - left.nodes.length || compareLocale(left.nodes.join(), right.nodes.join())),
     truncated,
     stateLimit,
     pathLimit,

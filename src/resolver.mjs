@@ -1,8 +1,47 @@
 import { buildResolverIndexes } from "./resolver-indexes.mjs";
 
+// Memoization is scoped to one buildResolverIndexes result via a WeakMap:
+// a fresh indexes object is built on every resolveFacts call, so cached
+// answers can never leak across a graph that changed in between.
+const memoByIndexes = new WeakMap();
+
+function memoFor(indexes) {
+  let memo = memoByIndexes.get(indexes);
+  if (!memo) {
+    memo = {
+      directSuperTypes: new Map(),
+      inheritedMemberTypes: new Map(),
+      parentTypes: new Map(),
+      candidates: new Map(),
+      wildcardRoutes: new Map(),
+    };
+    memoByIndexes.set(indexes, memo);
+  }
+  return memo;
+}
+
+const localVariableCacheByArray = new WeakMap();
+
+// Balanced generic stripping: the previous greedy /<.*>/g removed everything
+// from the first "<" to the last ">" in the string, so a type such as
+// "Foo<Bar>.Baz<Qux>" lost the ".Baz" segment. Tracking bracket depth
+// preserves segments outside generics and handles nested generics.
 function sourceTypeName(typeName) {
-  return String(typeName ?? "")
-    .replace(/<.*>/g, "")
+  const raw = String(typeName ?? "");
+  let stripped = "";
+  let depth = 0;
+  for (const char of raw) {
+    if (char === "<") {
+      depth += 1;
+      continue;
+    }
+    if (char === ">") {
+      if (depth > 0) depth -= 1;
+      continue;
+    }
+    if (depth === 0) stripped += char;
+  }
+  return stripped
     .replace(/(?:\s*\[\s*\])+$/gu, "")
     .trim();
 }
@@ -62,13 +101,26 @@ function headerTypeCandidates(indexes, typeName, typeRecord) {
 }
 
 function directSuperTypes(indexes, typeRecord) {
+  const memo = memoFor(indexes).directSuperTypes;
+  if (typeRecord && memo.has(typeRecord)) return memo.get(typeRecord);
   const candidates = [typeRecord?.extendsType, ...(typeRecord?.implementsTypes ?? [])]
     .filter(Boolean)
     .flatMap((declaredType) => headerTypeCandidates(indexes, declaredType, typeRecord));
-  return [...new Set(candidates)];
+  const result = [...new Set(candidates)];
+  if (typeRecord) memo.set(typeRecord, result);
+  return result;
 }
 
 function inheritedMemberTypeCandidates(indexes, sourceName, ownerType) {
+  const memoKey = `${ownerType?.node?.id ?? ownerType?.fullName ?? ""}\0${sourceName}`;
+  const memo = memoFor(indexes).inheritedMemberTypes;
+  if (memo.has(memoKey)) return memo.get(memoKey);
+  const result = inheritedMemberTypeCandidatesUncached(indexes, sourceName, ownerType);
+  memo.set(memoKey, result);
+  return result;
+}
+
+function inheritedMemberTypeCandidatesUncached(indexes, sourceName, ownerType) {
   const visited = new Set(ownerType ? [ownerType] : []);
   let frontier = directSuperTypes(indexes, ownerType);
   while (frontier.length) {
@@ -90,7 +142,7 @@ function inheritedMemberTypeCandidates(indexes, sourceName, ownerType) {
   return [];
 }
 
-function candidatesForType(indexes, typeName, context = null, ownerType = null, includeInherited = true) {
+function candidatesForTypeUncached(indexes, typeName, context = null, ownerType = null, includeInherited = true) {
   if (!typeName) return [];
   const sourceName = sourceTypeName(typeName);
   const direct = indexes.typesByFull.get(sourceName);
@@ -132,6 +184,25 @@ function candidatesForType(indexes, typeName, context = null, ownerType = null, 
     if (wildcardMatches.length) return wildcardMatches;
   }
   return globallyVisibleTypes(indexes.typesBySimple.get(simple) ?? []);
+}
+
+function candidatesForType(indexes, typeName, context = null, ownerType = null, includeInherited = true) {
+  if (!typeName) return [];
+  // The cache key must capture everything the uncached lookup depends on:
+  // the declaring file's package and imports, and the lexical owner type.
+  // Using only the package name would conflate files with different imports.
+  const memo = memoFor(indexes).candidates;
+  const key = [
+    typeName,
+    includeInherited ? "1" : "0",
+    context?.packageName ?? "",
+    (context?.imports ?? []).join(","),
+    ownerType?.node?.id ?? ownerType?.fullName ?? "",
+  ].join("\0");
+  if (memo.has(key)) return memo.get(key);
+  const result = candidatesForTypeUncached(indexes, typeName, context, ownerType, includeInherited);
+  memo.set(key, result);
+  return result;
 }
 
 function routeCandidatesForType(indexes, typeName) {
@@ -198,6 +269,32 @@ function compareEvidencePosition(left, right) {
 }
 
 function localVariableType(localVariables, call, receiverName) {
+  // Calls in one method repeatedly ask for the same receiver: precomputing
+  // per (method, receiver) once replaces a linear scan per call.
+  let perArray = localVariableCacheByArray.get(localVariables);
+  if (!perArray) {
+    perArray = new Map();
+    localVariableCacheByArray.set(localVariables, perArray);
+  }
+  // The result also depends on the call site: a reused local name must
+  // resolve to the nearest preceding declaration, so calls at different
+  // positions in the same method must not share a cache entry.
+  const cacheKey = [
+    call.enclosingMethod,
+    call.enclosingMethodArity,
+    call.enclosingMethodSignature,
+    receiverName,
+    call.evidence?.file ?? "",
+    call.evidence?.line ?? "",
+    call.evidence?.column ?? "",
+  ].join("\0");
+  if (perArray.has(cacheKey)) return perArray.get(cacheKey);
+  const result = localVariableTypeUncached(localVariables, call, receiverName);
+  perArray.set(cacheKey, result);
+  return result;
+}
+
+function localVariableTypeUncached(localVariables, call, receiverName) {
   let selected = null;
   for (const localVariable of localVariables) {
     if (localVariable.enclosingMethod !== call.enclosingMethod || localVariable.name !== receiverName) continue;
@@ -227,7 +324,11 @@ function routeMatches(pattern, url) {
 
 function parentTypes(indexes, typeRecord) {
   if (!typeRecord?.extendsType) return [];
-  return headerTypeCandidates(indexes, typeRecord.extendsType, typeRecord);
+  const memo = memoFor(indexes).parentTypes;
+  if (memo.has(typeRecord)) return memo.get(typeRecord);
+  const result = headerTypeCandidates(indexes, typeRecord.extendsType, typeRecord);
+  memo.set(typeRecord, result);
+  return result;
 }
 
 function inheritedEntryMethods(indexes, typeRecord, entryNames, acceptsMethod = () => true) {
@@ -315,9 +416,19 @@ export function resolveFacts(graph, facts) {
   for (const routeTarget of facts.routeTargets) {
     routeTarget.resolutionByRouteId = new Map();
     const routePattern = routeTarget.routeNode.name;
+    // Exact patterns were already bucketed; wildcard patterns now memoize
+    // their linear scan so duplicate servlet/Struts patterns do not rescan
+    // every route node.
+    const wildcardMemo = memoFor(indexes).wildcardRoutes;
     const mappedRoutes = routePattern === routePattern.replace(/\*+$/, "")
       ? indexes.routesByExactName.get(routePattern) ?? []
-      : indexes.routeNodes.filter((node) => routeMatches(routePattern, node.name));
+      : wildcardMemo.has(routePattern)
+        ? wildcardMemo.get(routePattern)
+        : (() => {
+          const matches = indexes.routeNodes.filter((node) => routeMatches(routePattern, node.name));
+          wildcardMemo.set(routePattern, matches);
+          return matches;
+        })();
     const directTargetTypes = routeCandidatesForType(indexes, routeTarget.targetClass);
     const springBeans = directTargetTypes.length === 0
       ? indexes.springBeansById.get(routeTarget.targetClass) ?? []

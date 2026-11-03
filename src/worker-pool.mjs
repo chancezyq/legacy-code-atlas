@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isProxy } from "node:util/types";
 import { Worker } from "node:worker_threads";
 
+import { compareText } from "./compare.mjs";
 import { createAbortError, throwIfAborted } from "./concurrency.mjs";
 import { FACT_SCHEMA, PARSER_VERSIONS, parserKindFor } from "./file-facts.mjs";
 import { readAndProcessFile } from "./file-processor.mjs";
@@ -55,12 +56,6 @@ class WorkerFailure extends Error {
     super("worker failed");
     this.name = "WorkerFailure";
   }
-}
-
-function compareText(left, right) {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
 }
 
 function isPlainObject(value) {

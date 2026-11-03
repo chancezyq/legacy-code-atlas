@@ -153,9 +153,10 @@ test("optional locator consumers reject a locator bound to a different normalize
 });
 
 test("parser source structure reuses one locator per top-level source", async () => {
-  const [javaSource, jspSource, xmlSource, webConfigSource, ibatisSource] = await Promise.all([
+  const [javaSource, jspSource, jsRequestsSource, xmlSource, webConfigSource, ibatisSource] = await Promise.all([
     "java.mjs",
     "jsp.mjs",
+    "javascript-requests.mjs",
     "xml-utils.mjs",
     "web-config.mjs",
     "ibatis.mjs",
@@ -168,8 +169,12 @@ test("parser source structure reuses one locator per top-level source", async ()
     /const locator = createEvidenceLocator\(content, filePath, \{\s*recognizeBareCarriageReturns: true,?\s*\}\);/u,
   );
 
-  assert.equal(occurrenceCount(jspSource, "createEvidenceLocator(content, filePath)"), 2);
-  assert.match(jspSource, /locator = createEvidenceLocator\(content, filePath\)/);
+  // The JSP parser creates one locator in parseJsp and passes it to the
+  // JavaScript-request extractor, whose default parameter still creates one
+  // when called directly: one locator per top-level source, across both files.
+  assert.equal(occurrenceCount(jspSource, "createEvidenceLocator(content, filePath)"), 1);
+  assert.equal(occurrenceCount(jsRequestsSource, "createEvidenceLocator(content, filePath)"), 1);
+  assert.match(jsRequestsSource, /locator = createEvidenceLocator\(content, filePath\)/);
   assert.match(jspSource, /const locator = createEvidenceLocator\(content, filePath\);/);
   assert.match(
     jspSource,

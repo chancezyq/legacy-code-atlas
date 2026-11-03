@@ -103,12 +103,19 @@ async function writeIndex(graph, outputPath) {
     throw new Error("未生成任何可分析节点，请确认项目目录包含受支持的源码文件且当前用户可以读取");
   }
   const serialized = serializeGraph(graph);
-  const serializedBytes = Buffer.byteLength(serialized);
-  if (serializedBytes > MAX_GRAPH_INDEX_BYTES) {
+  // The index file itself is written compactly: it is a machine file and
+  // the loader parses any valid JSON, so pretty-printing only buys
+  // whitespace (and a larger file to write on every run). serializeGraph
+  // itself stays pretty-printed on purpose: the benchmark and equivalence
+  // checks deliberately compare its output byte-for-byte against the frozen
+  // baseline, so changing it would silently weaken that determinism gate.
+  // The returned value is the pretty form, used only for --json stdout.
+  const compact = `${JSON.stringify(graph)}\n`;
+  const compactBytes = Buffer.byteLength(compact);
+  if (compactBytes > MAX_GRAPH_INDEX_BYTES) {
     throw new Error("项目索引不能超过 512 MiB");
   }
-  const bytes = Buffer.from(serialized);
-  await writeFileAtomic(outputPath, bytes);
+  await writeFileAtomic(outputPath, Buffer.from(compact));
   return serialized;
 }
 
@@ -605,7 +612,26 @@ async function main() {
     const graph = detailed.graph;
     const serialized = await writeIndex(graph, outputPath);
     if (json) process.stdout.write(serialized);
-    else process.stdout.write(`分析完成：${graph.summary.nodes} 个节点，${graph.summary.edges} 条关系\n索引：${outputPath}\n`);
+    else {
+      const { timings, stats } = detailed;
+      const statuses = Object.entries(stats.statuses)
+        .sort(([left], [right]) => left.localeCompare(right, "en"))
+        .map(([status, count]) => `${status} ${count}`)
+        .join("，");
+      // Graph warnings are the top-level signal for unresolved targets and
+      // skipped files; previously they were only visible inside index.json.
+      const warnings = graph.warnings ?? [];
+      const unresolved = warnings.filter((warning) => String(warning).startsWith("unresolved")).length;
+      process.stdout.write([
+        `分析完成：${graph.summary.nodes} 个节点，${graph.summary.edges} 条关系`,
+        `文件：扫描 ${stats.scanned} 个，跳过 ${stats.skipped} 个，缓存复用 ${stats.reused} 个；状态：${statuses}`,
+        `用时：${timings.totalMs.toFixed(1)}ms（扫描 ${timings.scanMs.toFixed(1)}ms / 分批 ${timings.batchMs.toFixed(1)}ms / 处理 ${timings.processMs.toFixed(1)}ms / 物化 ${timings.materializeMs.toFixed(1)}ms）`,
+        detailed.diagnostics.length ? `诊断：${detailed.diagnostics.length} 条` : "诊断：0 条",
+        `警告：${warnings.length} 条，其中未解析 ${unresolved} 条`,
+        `索引：${outputPath}`,
+        "",
+      ].join("\n"));
+    }
     return;
   }
 
@@ -646,9 +672,16 @@ async function main() {
       const scopeSummary = scope
         ? [`范围：${scope.kind === "module" ? "模块" : "功能"} ${scope.query}${scope.matched ? "" : "（no match，未找到匹配，文档为空）"}`]
         : [];
+      // The generated documents themselves carry a truncation note, but a
+      // user skimming CLI output would otherwise miss that the docs are
+      // incomplete, so surface the totals here too.
+      const truncationSummary = model.truncated
+        ? [`注意：文档已截断，用例 ${model.stats.useCases}/${model.stats.useCaseRoutesTotal}，页面 ${model.stats.pages}/${model.stats.pagesTotal}${model.detailsTruncated ? "；部分用例/页面详情也已截断" : ""}`]
+        : [];
       process.stdout.write([
         `文档生成完成：${model.stats.useCases} 个用例，${model.stats.pages} 个页面，${model.stats.modules} 个模块`,
         ...scopeSummary,
+        ...truncationSummary,
         ...files.map((file) => `- ${file}`),
         "",
       ].join("\n"));

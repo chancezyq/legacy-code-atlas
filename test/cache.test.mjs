@@ -153,3 +153,18 @@ test("file cache skips excessively deep in-memory records while saving", async (
 
   assert.deepEqual(JSON.parse(await readFile(cachePath, "utf8")).entries, {});
 });
+
+test("file cache saves compact JSON that still loads back", async (t) => {
+  const root = await temporaryDirectory(t);
+  const cachePath = path.join(root, "cache.json");
+  const entries = new Map([
+    ["src/A.java", { fingerprint: "a".repeat(64), record: recordFor("src/A.java") }],
+  ]);
+  await saveFileCache(cachePath, entries);
+  const payload = await readFile(cachePath, "utf8");
+  // One payload line (plus the trailing newline): pretty-printing would add
+  // an indented line per entry and per field.
+  assert.equal(payload.trim().split("\n").length, 1);
+  const loaded = await loadFileCache(cachePath);
+  assert.equal(loaded.get("src/A.java").fingerprint, "a".repeat(64));
+});

@@ -1,3 +1,4 @@
+import { compareLocale } from "./compare.mjs";
 import { normalizePath } from "./evidence.mjs";
 import { MAX_EVIDENCE_SNIPPET_CHARACTERS, MAX_SEARCH_TEXT_CHARACTERS } from "./index-validation.mjs";
 import { replaceUnsafeTextControls } from "./text-safety.mjs";
@@ -241,7 +242,7 @@ function edgeEvidenceKeysFor(edge, state) {
 function countBy(items, field) {
   const counts = {};
   for (const item of items) counts[item[field]] = (counts[item[field]] ?? 0) + 1;
-  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right, "en")));
+  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => compareLocale(left, right)));
 }
 
 export class GraphBuilder {
@@ -438,10 +439,10 @@ export class GraphBuilder {
 
   toJSON() {
     const nodes = [...this.nodes.values()]
-      .sort((left, right) => left.id.localeCompare(right.id, "en"))
+      .sort((left, right) => compareLocale(left.id, right.id))
       .map((node) => cloneValue(node));
     const edges = [...this.edges.values()]
-      .sort((left, right) => left.id.localeCompare(right.id, "en"))
+      .sort((left, right) => compareLocale(left.id, right.id))
       .map((edge) => cloneValue(edge));
     return {
       schemaVersion: "1.0.0",
@@ -454,7 +455,7 @@ export class GraphBuilder {
       },
       nodes,
       edges,
-      warnings: [...new Set(this.warnings)].sort((left, right) => left.localeCompare(right, "en")),
+      warnings: [...new Set(this.warnings)].sort((left, right) => compareLocale(left, right)),
     };
   }
 }

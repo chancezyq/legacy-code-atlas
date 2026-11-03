@@ -1,10 +1,11 @@
 import path from "node:path";
 
+import { compareLocale } from "./compare.mjs";
 import { GraphBuilder } from "./graph.mjs";
 import { isValidOutcomeName } from "./outcome-metadata.mjs";
+import { pageArrivalContexts } from "./arrival-contexts.mjs";
 import { normalizeRequestUrl, webPathForFile } from "./parsers/jsp.mjs";
 import { resolveFacts } from "./resolver.mjs";
-import { effectiveTilePages } from "./tile-composition.mjs";
 
 function fileNode(graph, file) {
   return graph.addNode({
@@ -56,8 +57,15 @@ function addRoute(graph, ownerNode, request, edgeType) {
     data: request.contextPageId ? { pageIds: [request.contextPageId] } : {},
   });
   if (request.contextPageId) {
-    edge.data.pageIds = [...new Set([...(edge.data.pageIds ?? []), request.contextPageId])]
-      .sort((left, right) => left.localeCompare(right, "en"));
+    // Avoid re-sorting on the common repeat case: if this page is already
+    // recorded for the edge/context, the arrays are already sorted.
+    const existingPageIds = edge.data.pageIds ?? [];
+    let changed = false;
+    if (!existingPageIds.includes(request.contextPageId)) {
+      edge.data.pageIds = [...new Set([...existingPageIds, request.contextPageId])]
+        .sort((left, right) => compareLocale(left, right));
+      changed = true;
+    }
     const contexts = Array.isArray(edge.data.requestContexts) ? edge.data.requestContexts : [];
     let context = contexts.find((candidate) => candidate.file === request.evidence.file
       && candidate.line === request.evidence.line
@@ -70,119 +78,23 @@ function addRoute(graph, ownerNode, request, edgeType) {
         pageIds: [],
       };
       contexts.push(context);
+      changed = true;
     }
-    context.pageIds = [...new Set([...context.pageIds, request.contextPageId])]
-      .sort((left, right) => left.localeCompare(right, "en"));
-    edge.data.requestContexts = contexts.sort((left, right) => (
-      left.file.localeCompare(right.file, "en")
-      || left.line - right.line
-      || left.column - right.column
-    ));
+    if (!context.pageIds.includes(request.contextPageId)) {
+      context.pageIds = [...new Set([...context.pageIds, request.contextPageId])]
+        .sort((left, right) => compareLocale(left, right));
+      changed = true;
+    }
+    if (changed) {
+      edge.data.requestContexts = contexts.sort((left, right) => compareLocale((
+        left.file, right.file)
+        || left.line - right.line
+        || left.column - right.column
+      ));
+    }
   }
   graph.addEdgeEvidence(edge, [request.evidence]);
   return route;
-}
-
-const ARRIVAL_EDGE_TYPES = new Set([
-  "forwards_to",
-  "redirects_to",
-  "uses_tile",
-  "includes",
-]);
-
-function addPageContext(contextsByPage, pageId, context) {
-  const contexts = contextsByPage.get(pageId) ?? new Map();
-  const key = `${context.routeUrl}\0${context.topPageId}`;
-  if (!contexts.has(key)) contexts.set(key, context);
-  contextsByPage.set(pageId, contexts);
-}
-
-function propagateArrivalContexts(graph, seeds, contextsByPage, allowedEdgeTypes = ARRIVAL_EDGE_TYPES) {
-  const outgoingBySource = new Map();
-  for (const edge of [...graph.edges.values()].sort((left, right) => left.id.localeCompare(right.id, "en"))) {
-    const outgoing = outgoingBySource.get(edge.source) ?? [];
-    outgoing.push(edge);
-    outgoingBySource.set(edge.source, outgoing);
-  }
-  const queue = [...seeds];
-  const visited = new Set();
-  for (let index = 0; index < queue.length; index += 1) {
-    const current = queue[index];
-    const visitKey = `${current.nodeId}\0${current.routeUrl}\0${current.topPageId}`;
-    if (visited.has(visitKey)) continue;
-    visited.add(visitKey);
-
-    const node = graph.nodes.get(current.nodeId);
-    if (!node) continue;
-    const topPageId = node.type === "page" ? current.topPageId || node.id : current.topPageId;
-    if (node.type === "page") {
-      addPageContext(contextsByPage, node.id, { routeUrl: current.routeUrl, topPageId });
-    }
-    for (const edge of outgoingBySource.get(node.id) ?? []) {
-      if (!allowedEdgeTypes.has(edge.type)) continue;
-      const target = graph.nodes.get(edge.target);
-      if (!target) continue;
-      if (edge.type === "uses_tile" && target.type === "tiles_definition") {
-        for (const composition of effectiveTilePages(target.id, graph.nodes, outgoingBySource)) {
-          queue.push({
-            nodeId: composition.node.id,
-            routeUrl: current.routeUrl,
-            topPageId,
-          });
-        }
-        continue;
-      }
-      queue.push({
-        nodeId: target.id,
-        routeUrl: edge.type === "redirects_to" && target.type === "route"
-          ? target.name
-          : current.routeUrl,
-        topPageId: edge.type === "redirects_to" ? "" : topPageId,
-      });
-    }
-  }
-}
-
-function pageArrivalContexts(graph) {
-  const contextsByPage = new Map();
-  const routeSeeds = [...graph.nodes.values()]
-    .filter((node) => node.type === "route")
-    .sort((left, right) => left.id.localeCompare(right.id, "en"))
-    .map((route) => ({ nodeId: route.id, routeUrl: route.name, topPageId: "" }));
-  propagateArrivalContexts(graph, routeSeeds, contextsByPage);
-
-  const pages = [...graph.nodes.values()]
-    .filter((node) => node.type === "page")
-    .sort((left, right) => left.id.localeCompare(right.id, "en"));
-  const includedPageIds = new Set(
-    [...graph.edges.values()].filter((edge) => edge.type === "includes").map((edge) => edge.target),
-  );
-  const fallbackRoots = pages.filter((page) => !contextsByPage.has(page.id) && !includedPageIds.has(page.id));
-  propagateArrivalContexts(
-    graph,
-    fallbackRoots.map((page) => ({
-      nodeId: page.id,
-      routeUrl: webPathForFile(page.filePath ?? page.name),
-      topPageId: page.id,
-    })),
-    contextsByPage,
-    new Set(["includes"]),
-  );
-  for (const page of pages) {
-    if (contextsByPage.has(page.id)) continue;
-    propagateArrivalContexts(graph, [{
-      nodeId: page.id,
-      routeUrl: webPathForFile(page.filePath ?? page.name),
-      topPageId: page.id,
-    }], contextsByPage, new Set(["includes"]));
-  }
-  return new Map([...contextsByPage].map(([pageId, contexts]) => [
-    pageId,
-    [...contexts.values()].sort((left, right) => (
-      left.routeUrl.localeCompare(right.routeUrl, "en")
-      || left.topPageId.localeCompare(right.topPageId, "en")
-    )),
-  ]));
 }
 
 function methodRecord(graph, type, method, disambiguateSignature = false) {
@@ -785,10 +697,10 @@ function fileFromRecord(record) {
 }
 
 function compareEvidence(left, right) {
-  return String(left.file ?? "").localeCompare(String(right.file ?? ""), "en")
+  return compareLocale(String(left.file ?? ""), String(right.file ?? ""))
     || (left.line ?? 0) - (right.line ?? 0)
     || (left.column ?? 0) - (right.column ?? 0)
-    || String(left.snippet ?? "").localeCompare(String(right.snippet ?? ""), "en");
+    || compareLocale(String(left.snippet ?? ""), String(right.snippet ?? ""));
 }
 
 function uniqueEvidence(entries) {
@@ -877,7 +789,7 @@ function classifyStrutsOutcomes(graph, resolverFacts) {
 }
 
 export function materializeRecords({ projectRoot, records, skipped = [] }) {
-  const ordered = [...records].sort((left, right) => left.relativePath.localeCompare(right.relativePath, "en"));
+  const ordered = [...records].sort((left, right) => compareLocale(left.relativePath, right.relativePath));
   const graph = new GraphBuilder({ projectRoot });
   for (const entry of skipped) {
     if (["file-too-large", "binary-file", "symbolic-link"].includes(entry.reason)) {
@@ -942,15 +854,15 @@ export function materializeRecords({ projectRoot, records, skipped = [] }) {
     }
   }
 
-  // Discover arrivals on the resolved graph, then rebuild resolver edges after browser hints exist.
-  const preResolutionEdgeIds = new Set(graph.edges.keys());
-  const preResolutionWarningCount = graph.warnings.length;
-  resolveFacts(graph, resolverFacts);
+  // Arrival contexts only traverse materialized arrival edges
+  // (forwards_to, redirects_to, uses_tile, includes); resolver edges
+  // (maps_to, dispatches_to, calls, ...) are never traversed by
+  // pageArrivalContexts, and the first resolve's warnings were discarded
+  // before this point anyway. Running resolveFacts once, after JSP/JS
+  // request routes exist, therefore produces the same final graph with
+  // half the resolver work. If this invariant ever changes, reintroduce
+  // a hint-only resolve pass instead of a mutating one.
   const contextsByPage = pageArrivalContexts(graph);
-  for (const edgeId of graph.edges.keys()) {
-    if (!preResolutionEdgeIds.has(edgeId)) graph.edges.delete(edgeId);
-  }
-  graph.warnings.length = preResolutionWarningCount;
   materializeJspRequests(graph, pendingJspPages, contextsByPage, struts2RoutesByName);
   const loadingContextsByScript = materializeJspScripts(
     graph,

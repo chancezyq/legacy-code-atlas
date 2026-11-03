@@ -2,6 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.mjs";
+import { compareLocale } from "./compare.mjs";
 
 export const CACHE_SCHEMA = "legacy-code-atlas/cache/1";
 const FINGERPRINT = /^[a-f0-9]{64}$/;
@@ -93,7 +94,7 @@ function normalizedEntries(value) {
   const entries = new Map();
   const candidates = entriesFrom(value)
     .filter(([relativePath]) => typeof relativePath === "string")
-    .sort(([left], [right]) => left.localeCompare(right, "en"));
+    .sort(([left], [right]) => compareLocale(left, right));
   for (const [relativePath, entry] of candidates) {
     if (!validEntry(relativePath, entry)) continue;
     const record = reusableRecordCopy(entry.record);
@@ -118,7 +119,7 @@ export function cacheEntriesFromResults(results) {
   }
   return new Map([...entries.entries()]
     .filter(([relativePath]) => typeof relativePath === "string")
-    .sort(([left], [right]) => left.localeCompare(right, "en")));
+    .sort(([left], [right]) => compareLocale(left, right)));
 }
 
 export async function loadFileCache(filePath, { io = { readFile, stat } } = {}) {
@@ -139,6 +140,10 @@ export async function loadFileCache(filePath, { io = { readFile, stat } } = {}) 
 export async function saveFileCache(filePath, entries, options = {}) {
   const normalized = normalizedEntries(entries);
   const serializable = Object.fromEntries(normalized);
-  const payload = `${JSON.stringify({ schemaVersion: CACHE_SCHEMA, entries: serializable }, null, 2)}\n`;
+  // Compact serialization: the cache is a machine file and the loader parses
+  // any valid JSON, so pretty-printing only buys whitespace (and a larger
+  // file to write on every run). Human-readable output is still available
+  // by piping the file through a JSON formatter.
+  const payload = `${JSON.stringify({ schemaVersion: CACHE_SCHEMA, entries: serializable })}\n`;
   await writeFileAtomic(filePath, payload, options);
 }

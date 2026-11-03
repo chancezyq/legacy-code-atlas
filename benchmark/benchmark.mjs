@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertGraphEquivalent } from "./baseline.mjs";
 import { serializeGraph } from "../src/graph.mjs";
+import { searchGraph, traverseGraph } from "../src/query.mjs";
 
 const run = promisify(execFile);
 const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -128,7 +129,19 @@ export async function runBenchmark({ fileCount = 500, samples = 3, minimumSpeedu
       }
     }
     const ratio = assertMinimumSpeedup(baselineSamples, candidateSamples, minimumSpeedup);
-    return { fileCount, samples, baselineSamples, candidateSamples, baselineMedianMs: median(baselineSamples), candidateMedianMs: median(candidateSamples), speedup: ratio };
+    // The gate above only covers analysis time. Report candidate query and
+    // traversal time as well, ungated, so a query regression cannot hide
+    // behind a fast analysis: 20 searches and 20 traversals over the
+    // sample-0 candidate graph, measured in-process.
+    const queryGraph = JSON.parse(candidateSerialized);
+    const queryStarted = process.hrtime.bigint();
+    for (let index = 0; index < 20; index += 1) {
+      searchGraph(queryGraph, "order0", { limit: 25 });
+      const firstPage = queryGraph.nodes.find((node) => node.type === "page");
+      if (firstPage) traverseGraph(queryGraph, [firstPage.id]);
+    }
+    const candidateQuerySampleMs = Number(process.hrtime.bigint() - queryStarted) / 1e6;
+    return { fileCount, samples, baselineSamples, candidateSamples, baselineMedianMs: median(baselineSamples), candidateMedianMs: median(candidateSamples), speedup: ratio, candidateQuerySampleMs };
   } finally {
     await Promise.all([
       rm(project, { recursive: true, force: true }),
