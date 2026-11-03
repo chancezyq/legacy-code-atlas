@@ -18,7 +18,12 @@ export const FACT_SCHEMA = "1.0.0";
 
 export const PARSER_VERSIONS = Object.freeze({
   java: "1.4.8",
-  jsp: "1.5.10",
+  // 1.5.11: JSP field values and names are sanitized for control
+  // characters (previously a numeric entity such as &#13; or a multiline
+  // textarea value produced a fieldDetails staticValue that failed
+  // validation and aborted the scan). Bumping the version forces cached
+  // pre-fix JSP facts to be re-parsed.
+  jsp: "1.5.11",
   javascript: "1.1.2",
   xml: "1.3.4",
   sql: "1.0.0",

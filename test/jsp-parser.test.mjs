@@ -1017,6 +1017,31 @@ test("JSP parser extracts native select and textarea defaults", () => {
   });
 });
 
+test("JSP parser replaces control characters in field values instead of failing validation", () => {
+  const result = parseJsp([
+    '<form action="/dispatch.do">',
+    '  <input type="text" name="code" value="a&#13;b" />',
+    '  <input type="text" name="tabbed" value="a&#9;b" />',
+    '  <textarea name="note">first line',
+    'second line</textarea>',
+    '  <input type="text" name="plain" value="ok" />',
+    '</form>',
+  ].join("\n"), "WebRoot/edit.jsp");
+
+  assert.deepEqual(result.fields.map(({ name, value }) => [name, value]), [
+    ["code", "a b"],
+    ["tabbed", "a b"],
+    ["note", "first line second line"],
+    ["plain", "ok"],
+  ]);
+  for (const field of result.fields) {
+    assert.equal(/[\u0000-\u001f\u007f]/u.test(field.value), false);
+  }
+  assert.deepEqual(result.warnings, [
+    "JSP field control characters replaced in WebRoot/edit.jsp (3 fields)",
+  ]);
+});
+
 test("JSP parser excludes disabled and non-submitting controls from form defaults", () => {
   const result = parseJsp([
     '<form action="/dispatch.do">',

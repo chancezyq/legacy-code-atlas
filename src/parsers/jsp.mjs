@@ -1,4 +1,5 @@
 import { createEvidenceLocator } from "../evidence.mjs";
+import { replaceUnsafeTextControls } from "../text-safety.mjs";
 import { extractJavaScriptRequests } from "./javascript-requests.mjs";
 import {
   URL_SCHEME,
@@ -574,7 +575,14 @@ function isChoiceField(tagName, attributes) {
 function fieldValueState(value) {
   const decoded = decodeHtmlEntities(value);
   const runtimeDerived = /\$\{|%\{|<%|<[A-Za-z][\w.-]*:[A-Za-z][\w.-]*(?=[\s/>])/u.test(decoded);
-  return { value: runtimeDerived ? "" : decoded, runtimeDerived };
+  // A decoded value can legitimately contain control characters: numeric
+  // entities such as &#13; decode to them, and a textarea's default text
+  // keeps its newlines. Index validation rejects control characters in
+  // every string, so without this step one such field would fail the
+  // whole scan. Replace them with a space, as the properties parser does
+  // for its values, and let the caller report the replacement.
+  const clean = runtimeDerived ? "" : replaceUnsafeTextControls(decoded);
+  return { value: clean, runtimeDerived, sanitized: !runtimeDerived && clean !== decoded };
 }
 
 function attributeFieldValueState(tagName, attributes) {
@@ -584,7 +592,7 @@ function attributeFieldValueState(tagName, attributes) {
 }
 
 function staticFieldName(value) {
-  const name = String(value ?? "").trim();
+  const name = replaceUnsafeTextControls(String(value ?? "")).trim();
   return name && !/\$\{|%\{|<%|<[^>]*>/u.test(name) ? name : "";
 }
 
@@ -649,6 +657,7 @@ function selectFieldValueState(openingTag, attributes, tags, content) {
           ? state.value
           : decodeVisibleText(state.value),
         runtimeDerived: state.runtimeDerived,
+        sanitized: state.sanitized,
       }];
     })
     .filter((option) => !option.disabled);
@@ -656,7 +665,7 @@ function selectFieldValueState(openingTag, attributes, tags, content) {
   if (Object.hasOwn(attributes, "multiple")) {
     return selected.length === 1
       ? selected[0]
-      : { value: "", runtimeDerived: selected.some((option) => option.runtimeDerived) };
+      : { value: "", runtimeDerived: selected.some((option) => option.runtimeDerived), sanitized: false };
   }
   return selected.at(-1) ?? options[0] ?? { value: "", runtimeDerived: false };
 }
@@ -722,6 +731,7 @@ export function parseJsp(content, filePath) {
   const fields = [];
   const unresolvedFields = [];
   const warnings = [];
+  let sanitizedFieldValues = 0;
   const pageWebPath = webPathForFile(filePath);
   const scanSources = jspScanSources(content);
   const markupStructure = scanSources.structure;
@@ -803,6 +813,7 @@ export function parseJsp(content, filePath) {
     const attributes = attributesFrom(source);
     if (!attributes.name) continue;
     const valueState = nativeFieldValueState(match, attributes, tags, content);
+    if (valueState.sanitized) sanitizedFieldValues += 1;
     const value = valueState.value;
     const requestMetadata = requestFieldMetadata(
       match.name,
@@ -858,6 +869,7 @@ export function parseJsp(content, filePath) {
         ? "name"
         : attributes.path !== undefined ? "path" : "key";
     const valueState = attributeFieldValueState(match.name, attributes);
+    if (valueState.sanitized) sanitizedFieldValues += 1;
     const value = valueState.value;
     const requestMetadata = requestFieldMetadata(
       match.name,
@@ -947,6 +959,10 @@ export function parseJsp(content, filePath) {
       unresolvedFieldsByOwner,
       formIdCounts,
     )) assignedFieldOffsets.add(field.offset);
+  }
+
+  if (sanitizedFieldValues > 0) {
+    warnings.push(`JSP field control characters replaced in ${filePath} (${sanitizedFieldValues} fields)`);
   }
 
   return {
