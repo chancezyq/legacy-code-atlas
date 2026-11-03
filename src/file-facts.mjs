@@ -22,7 +22,11 @@ export const PARSER_VERSIONS = Object.freeze({
   javascript: "1.1.2",
   xml: "1.3.4",
   sql: "1.0.0",
-  properties: "1.0.0",
+  // 1.0.1: properties values and evidence snippets are sanitized for
+  // control characters (previously a decoded escape such as \n or \u0007
+  // produced an index that failed validation and aborted the scan).
+  // Bumping the version forces cached pre-fix facts to be re-parsed.
+  properties: "1.0.1",
   metadata: "1.0.0",
 });
 

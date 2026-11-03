@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseProperties } from "../src/parsers/properties.mjs";
+import { containsUnsafeTextControl } from "../src/text-safety.mjs";
 
 test("properties parser extracts bounded message entries with source evidence", () => {
   const result = parseProperties([
@@ -55,4 +56,31 @@ test("properties parser preserves evidence lines and snippets for CRLF files", (
 test("properties parser preserves evidence lines for bare carriage returns", () => {
   const result = parseProperties("first=One\rsecond=Two\rthird=Three", "legacy.properties");
   assert.deepEqual(result.entries.map(({ evidence }) => evidence.line), [1, 2, 3]);
+});
+
+test("properties parser replaces control characters instead of failing validation", () => {
+  const result = parseProperties([
+    "greeting=hello\\nworld",
+    "bell=ring\\u0007bell",
+    "separator=a\\u2028b",
+    "tabbed=a\tb",
+    "\\u0001=key with only a control character",
+  ].join("\n"), "src/internet/app.properties");
+
+  assert.deepEqual(result.entries.map(({ key, value }) => [key, value]), [
+    ["greeting", "hello world"],
+    ["bell", "ring bell"],
+    ["separator", "a b"],
+    ["tabbed", "a b"],
+  ]);
+  for (const entry of result.entries) {
+    assert.equal(containsUnsafeTextControl(entry.key), false);
+    assert.equal(containsUnsafeTextControl(entry.value), false);
+    assert.equal(containsUnsafeTextControl(entry.evidence.snippet), false);
+  }
+  assert.equal(result.entries[3].evidence.snippet, "tabbed=a b");
+  assert.deepEqual(result.warnings, [
+    "properties control characters replaced in src/internet/app.properties (4 entries)",
+    "properties entries omitted in src/internet/app.properties because the key became empty after control-character replacement (1 entries)",
+  ]);
 });

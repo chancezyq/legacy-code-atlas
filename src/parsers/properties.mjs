@@ -1,4 +1,5 @@
 import { createEvidenceLocator } from "../evidence.mjs";
+import { replaceUnsafeTextControls } from "../text-safety.mjs";
 
 const MAX_ENTRIES = 10_000;
 const MAX_ENTRY_CHARACTERS = 64 * 1024;
@@ -76,6 +77,8 @@ export function parseProperties(content, filePath) {
   }
   const entries = [];
   const warnings = [];
+  let sanitizedEntries = 0;
+  let omittedEntries = 0;
 
   for (let index = 0; index < physicalLines.length;) {
     const startIndex = index;
@@ -93,14 +96,35 @@ export function parseProperties(content, filePath) {
     }
     const parsed = splitEntry(trimmed);
     if (!parsed.key) continue;
-    if (parsed.key.length > MAX_ENTRY_CHARACTERS || parsed.value.length > MAX_ENTRY_CHARACTERS) {
+    // decodeEscapes can turn a legitimate escape such as \n, \t, or \u0007
+    // into a real control character, and a raw control byte in the file
+    // survives untouched. The index validator rejects control characters
+    // in every string, so without this step one stray escape would fail
+    // the whole scan. Replace them with a space instead: the entry stays
+    // readable and searchable, and the scan continues. This matches how
+    // Graph already sanitizes evidence snippets and search text.
+    const key = replaceUnsafeTextControls(parsed.key);
+    const value = replaceUnsafeTextControls(parsed.value);
+    if (!key.trim()) {
+      omittedEntries += 1;
+      continue;
+    }
+    if (key !== parsed.key || value !== parsed.value) sanitizedEntries += 1;
+    if (key.length > MAX_ENTRY_CHARACTERS || value.length > MAX_ENTRY_CHARACTERS) {
       warnings.push(`oversized properties entry omitted in ${filePath} at line ${startIndex + 1}`);
       continue;
     }
-    entries.push({
-      ...parsed,
-      evidence: locator.at(offsets[startIndex] + physicalLines[startIndex].search(/\S/u), physicalLines[startIndex].length),
-    });
+    // The materializer assigns this evidence to the file node directly,
+    // bypassing Graph's snippet sanitization, so sanitize it here too.
+    const evidence = locator.at(offsets[startIndex] + physicalLines[startIndex].search(/\S/u), physicalLines[startIndex].length);
+    evidence.snippet = replaceUnsafeTextControls(evidence.snippet);
+    entries.push({ key, value, evidence });
+  }
+  if (sanitizedEntries > 0) {
+    warnings.push(`properties control characters replaced in ${filePath} (${sanitizedEntries} entries)`);
+  }
+  if (omittedEntries > 0) {
+    warnings.push(`properties entries omitted in ${filePath} because the key became empty after control-character replacement (${omittedEntries} entries)`);
   }
   return { entries, warnings };
 }

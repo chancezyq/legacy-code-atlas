@@ -65,7 +65,7 @@ test("parserKindFor selects explicit versioned parsers and scanner-compatible me
   assert.equal(PARSER_VERSIONS.javascript, "1.1.2");
   assert.equal(PARSER_VERSIONS.xml, "1.3.4");
   assert.equal(PARSER_VERSIONS.sql, "1.0.0");
-  assert.equal(PARSER_VERSIONS.properties, "1.0.0");
+  assert.equal(PARSER_VERSIONS.properties, "1.0.1");
   for (const version of Object.values(PARSER_VERSIONS)) assert.match(version, /^\d+\.\d+\.\d+$/);
 });
 
